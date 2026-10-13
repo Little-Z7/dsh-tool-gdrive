@@ -1,0 +1,5 @@
+node_modules/
+*.tmp-*
+.DS_Store
+*.tgz
+# 注意：lib/ 构建产物需要提交（GitHub 直接安装通道不跑构建）
