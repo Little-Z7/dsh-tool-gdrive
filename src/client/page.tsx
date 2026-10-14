@@ -48,6 +48,7 @@ interface FormSnapshot {
 	maxChars: { text: string; overridden: boolean; invalid: boolean }
 	pageSize: { text: string; overridden: boolean; invalid: boolean }
 	secretConfigured: boolean
+	clientIdConfigured: boolean
 	effectiveBridgePort: number
 }
 
@@ -94,6 +95,7 @@ export class GdriveFormController {
 			maxChars: this.form.field('maxChars'),
 			pageSize: this.form.field('pageSize'),
 			secretConfigured: typeof user.clientSecret === 'string' && user.clientSecret.length > 0,
+			clientIdConfigured: typeof user.clientId === 'string' && user.clientId.length > 0,
 			effectiveBridgePort: bridge
 		}
 	}
@@ -197,11 +199,11 @@ function AuthWizard(props: { t: T; bridgePort: number }) {
 	)
 }
 
-/** GCP 建项目指引（折叠，原生 details）。 */
-function GcpGuide(props: { t: T }) {
+/** GCP 建项目指引（折叠；未配置凭证时默认展开）。 */
+function GcpGuide(props: { t: T; defaultOpen: boolean }) {
 	const { t } = props
 	return (
-		<details>
+		<details open={props.defaultOpen || undefined}>
 			<summary>{t('guideTitle')}</summary>
 			<ol>
 				<li>{t('guideStep1')}</li>
@@ -319,7 +321,7 @@ export function GdrivePage(props: PageProps) {
 					onReset={() => props.resetField('pageSize')}
 				/>
 			</SettingsForm>
-			<GcpGuide t={t} />
+			<GcpGuide t={t} defaultOpen={!(state.clientIdConfigured && state.secretConfigured)} />
 			<AuthWizard t={t} bridgePort={state.effectiveBridgePort} />
 		</div>
 	)
