@@ -8,6 +8,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { type AuthMode } from './auth.js';
 export declare const name = "gdrive";
 export declare const inject: string[];
+/** 逻辑配置（volatile 字段在运行期可能是装箱引用，统一经 readV 读取）。 */
 export interface PluginConfig {
     clientId?: string;
     clientSecret?: string;
@@ -20,24 +21,24 @@ export interface PluginConfig {
     timeoutMs: number;
 }
 export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
-    clientId: Schema<string, string, "plain">;
-    clientSecret: Schema<string, string, "plain">;
-    port: Schema<number, number, "defined">;
-    bridgePort: Schema<number, number, "defined">;
-    tokenPath: Schema<string, string, "defined">;
-    mode: Schema<"readonly" | "readwrite" | "full", "readonly" | "readwrite" | "full", "defined">;
-    maxChars: Schema<number, number, "defined">;
-    pageSize: Schema<number, number, "defined">;
-    timeoutMs: Schema<number, number, "defined">;
+    clientId: Schema<string, string, "volatile">;
+    clientSecret: Schema<string, string, "volatile">;
+    port: Schema<number, number, "volatile-defined">;
+    bridgePort: Schema<number, number, "volatile-defined">;
+    tokenPath: Schema<string, string, "volatile-defined">;
+    mode: Schema<"readonly" | "readwrite" | "full", "readonly" | "readwrite" | "full", "volatile-defined">;
+    maxChars: Schema<number, number, "volatile-defined">;
+    pageSize: Schema<number, number, "volatile-defined">;
+    timeoutMs: Schema<number, number, "volatile-defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
-    clientId: Schema<string, string, "plain">;
-    clientSecret: Schema<string, string, "plain">;
-    port: Schema<number, number, "defined">;
-    bridgePort: Schema<number, number, "defined">;
-    tokenPath: Schema<string, string, "defined">;
-    mode: Schema<"readonly" | "readwrite" | "full", "readonly" | "readwrite" | "full", "defined">;
-    maxChars: Schema<number, number, "defined">;
-    pageSize: Schema<number, number, "defined">;
-    timeoutMs: Schema<number, number, "defined">;
+    clientId: Schema<string, string, "volatile">;
+    clientSecret: Schema<string, string, "volatile">;
+    port: Schema<number, number, "volatile-defined">;
+    bridgePort: Schema<number, number, "volatile-defined">;
+    tokenPath: Schema<string, string, "volatile-defined">;
+    mode: Schema<"readonly" | "readwrite" | "full", "readonly" | "readwrite" | "full", "volatile-defined">;
+    maxChars: Schema<number, number, "volatile-defined">;
+    pageSize: Schema<number, number, "volatile-defined">;
+    timeoutMs: Schema<number, number, "volatile-defined">;
 }>>, "plain">;
 export declare function apply(ctx: Context, config: PluginConfig): void;

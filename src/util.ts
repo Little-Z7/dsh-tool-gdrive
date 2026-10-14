@@ -12,6 +12,18 @@ export function tryOpenBrowser(url: string): Promise<boolean> {
 	})
 }
 
+/**
+ * 读取可能被 Volatile 装箱的配置值。
+ * volatile 字段在运行期以 { get(): snapshot } 引用传递，UI 保存会就地提交；
+ * 每次用 .get() 读到的都是最新值。非装箱值（普通字段/测试直传）原样返回。
+ */
+export function readV<T>(v: unknown): T {
+	if (typeof v === 'object' && v !== null && typeof (v as { get?: unknown }).get === 'function') {
+		return (v as { get(): T }).get()
+	}
+	return v as T
+}
+
 
 /** 严格 JSON 值类型（本地定义，避免传递依赖）。 */
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
