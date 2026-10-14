@@ -2,11 +2,10 @@
  * 10 个模型可见工具：授权向导（status/start）、目录与搜索、元数据、读取、上传、更新、Docs、Sheets。
  * @module dsh-tool-gdrive/tools
  */
-import { exec as execChild } from 'node:child_process'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AuthMode, GDriveAuth } from './auth.js'
 import type { GClient } from './gclient.js'
-import { GDriveError, type JsonValue } from './util.js'
+import { GDriveError, tryOpenBrowser, type JsonValue } from './util.js'
 
 export interface ToolsDeps {
 	auth: GDriveAuth
@@ -67,13 +66,6 @@ function assertWritable(mode: AuthMode): void {
 			'当前为只读模式（mode=readonly），写入被拒绝',
 			'把插件配置 mode 改为 readwrite（写本插件创建的文件）或 full（写全部文件），删除 token 文件后重新 gdrive_auth_start 授权'
 		)
-}
-
-function tryOpenBrowser(url: string): Promise<boolean> {
-	const cmd = process.platform === 'darwin' ? `open "${url}"` : process.platform === 'win32' ? `cmd /c start "" "${url}"` : `xdg-open "${url}"`
-	return new Promise((resolve) => {
-		execChild(cmd, (err) => resolve(!err))
-	})
 }
 
 /** null/undefined 统一剔除，保证输出是严格 JSON。 */

@@ -9,8 +9,8 @@ export type AuthMode = 'readonly' | 'readwrite' | 'full';
  */
 export declare function scopesForMode(mode: AuthMode): string[];
 export interface AuthConfig {
-    clientId: string;
-    clientSecret: string;
+    clientId?: string;
+    clientSecret?: string;
     port: number;
     tokenPath: string;
     scopes: string[];
@@ -23,6 +23,9 @@ export declare class GDriveAuth {
     private pending;
     private inflight;
     constructor(cfg: AuthConfig);
+    /** 是否已配置 GCP OAuth 凭证（区别于是否已授权）。 */
+    get configured(): boolean;
+    private assertConfigured;
     private newClient;
     private load;
     /** 先写盘（临时文件 + chmod + 原子 rename）再提交内存，失败不产生不一致状态。 */

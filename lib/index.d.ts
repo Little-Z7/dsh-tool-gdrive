@@ -9,9 +9,10 @@ import { type AuthMode } from './auth.js';
 export declare const name = "gdrive";
 export declare const inject: string[];
 export interface PluginConfig {
-    clientId: string;
-    clientSecret: string;
+    clientId?: string;
+    clientSecret?: string;
     port: number;
+    bridgePort: number;
     tokenPath: string;
     mode: AuthMode;
     maxChars: number;
@@ -19,18 +20,20 @@ export interface PluginConfig {
     timeoutMs: number;
 }
 export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
-    clientId: Schema<string, string, "defined">;
-    clientSecret: Schema<string, string, "defined">;
+    clientId: Schema<string, string, "plain">;
+    clientSecret: Schema<string, string, "plain">;
     port: Schema<number, number, "defined">;
+    bridgePort: Schema<number, number, "defined">;
     tokenPath: Schema<string, string, "defined">;
     mode: Schema<"readonly" | "readwrite" | "full", "readonly" | "readwrite" | "full", "defined">;
     maxChars: Schema<number, number, "defined">;
     pageSize: Schema<number, number, "defined">;
     timeoutMs: Schema<number, number, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
-    clientId: Schema<string, string, "defined">;
-    clientSecret: Schema<string, string, "defined">;
+    clientId: Schema<string, string, "plain">;
+    clientSecret: Schema<string, string, "plain">;
     port: Schema<number, number, "defined">;
+    bridgePort: Schema<number, number, "defined">;
     tokenPath: Schema<string, string, "defined">;
     mode: Schema<"readonly" | "readwrite" | "full", "readonly" | "readwrite" | "full", "defined">;
     maxChars: Schema<number, number, "defined">;

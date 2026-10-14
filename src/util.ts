@@ -2,6 +2,16 @@
  * 共享工具：中文可操作错误、限流重试、AbortSignal 响应、文本截断、Drive 查询转义。
  * @module dsh-tool-gdrive/util
  */
+import { exec as execChild } from 'node:child_process'
+
+/** 尽力打开系统浏览器；失败返回 false（调用方应同时展示 URL）。 */
+export function tryOpenBrowser(url: string): Promise<boolean> {
+	const cmd = process.platform === 'darwin' ? `open "${url}"` : process.platform === 'win32' ? `cmd /c start "" "${url}"` : `xdg-open "${url}"`
+	return new Promise((resolve) => {
+		execChild(cmd, (err) => resolve(!err))
+	})
+}
+
 
 /** 严格 JSON 值类型（本地定义，避免传递依赖）。 */
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }

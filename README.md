@@ -33,24 +33,37 @@ DeepSeek Harness（DSH）的 Google 云端硬盘插件：读写闭环 + 工具�
 
 ## 配置
 
+**推荐：插件内置配置页（0.2.0+）。** 桌面版 / Web 侧栏「插件 → dsh-tool-gdrive → 配置」里直接填 Client ID / Secret、选 mode，保存即生效——不用手编任何 YAML。页面上还有 GCP 建项目图文指引、实时授权状态和「开始授权」按钮（点一下自动拉起浏览器，授权完成页面自动变成已授权）。
+
+也可以手写配置（cordis.yml / profile 的插件条目）：
+
 ```yaml
-# cordis.yml / profile 里的插件条目
 - id: gdrive
   name: dsh-tool-gdrive
   config:
     clientId: xxx.apps.googleusercontent.com
     clientSecret: xxx
     mode: readwrite        # readonly（默认）| readwrite | full
-    # port: 55414          # 可选，回调端口
+    # port: 55414          # 可选，OAuth 回调端口
+    # bridgePort: 0        # 可选，配置页桥接端口；0 = port+10
     # maxChars: 8000       # 可选，读取截断
     # pageSize: 20         # 可选，分页大小
 ```
 
+`clientId/clientSecret` 在 0.2.0 起为可选：未配置时插件正常加载、配置页可用，只有 API 调用会给出中文指引报错。
+
 ## 使用流程
 
-1. 对话里让 Agent 调 `gdrive_auth_start` → 浏览器打开授权页 → 登录同意。
-2. `gdrive_auth_status` 确认已授权。
-3. 正常使用其余工具。写操作在 `readonly` 模式下会被拒绝并给出切换指引；切换 `mode` 后需删除 token 文件（默认 `~/.config/dsh/gdrive-tokens.json`）重新授权。
+1. 在插件配置页填入 `clientId/clientSecret` 并保存（页内有 GCP 建项目图文指引）。
+2. 点页面上的「开始授权」（或对话里让 Agent 调 `gdrive_auth_start`）→ 浏览器打开授权页 → 登录同意。
+3. 页面状态变为「已授权」（或调 `gdrive_auth_status` 确认）。
+4. 正常使用其余工具。写操作在 `readonly` 模式下会被拒绝并给出切换指引；切换 `mode` 后需删除 token 文件（默认 `~/.config/dsh/gdrive-tokens.json`）重新授权。
+
+## 安全说明
+
+- token 只存本机文件（0600），不随包分发、不进任何远程。
+- 配置页桥接仅绑定 `127.0.0.1`：`/gdrive/status` 不含 token，`/gdrive/start-auth` 仅接受 POST；CORS 放开仅限本机回环场景。
+- OAuth 回调带随机 `state` 校验，防回环授权码注入。
 
 ## 开发与打包
 
