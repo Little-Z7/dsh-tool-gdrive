@@ -121,8 +121,7 @@ export class GClient {
 			signal
 		)
 		const files = cleanFiles(res.data.files)
-		const nextPageToken = res.data.nextPageToken ?? undefined
-		return { files, nextPageToken, hasMore: nextPageToken !== undefined }
+		return listResult(files, res.data.nextPageToken)
 	}
 
 	/** 搜索：keyword 同时匹配文件名与全文；可叠加 mimeType / folderId 过滤。 */
@@ -155,8 +154,7 @@ export class GClient {
 			signal
 		)
 		const files = cleanFiles(res.data.files)
-		const nextPageToken = res.data.nextPageToken ?? undefined
-		return { files, nextPageToken, hasMore: nextPageToken !== undefined }
+		return listResult(files, res.data.nextPageToken)
 	}
 
 	/** 取单个文件的元数据（含 shortcut 目标）。 */
@@ -470,6 +468,12 @@ export class GClient {
 		if (updates?.updatedCells != null) out.updatedCells = updates.updatedCells
 		return out
 	}
+}
+
+/** 组装分页结果：无下一页时省略 nextPageToken 键（显式 undefined 过不了 harness 的无损 JSON 校验）。 */
+function listResult(files: FileItem[], token: string | null | undefined): ListResult {
+	const hasToken = token !== undefined && token !== null && token !== ''
+	return hasToken ? { files, nextPageToken: token, hasMore: true } : { files, hasMore: false }
 }
 
 /**
