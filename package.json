@@ -1,6 +1,6 @@
 {
   "name": "dsh-tool-gdrive",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "DeepSeek Harness Google Drive 插件：读写闭环（列目录/搜索/下载/上传/改名/移动/软删/Docs/Sheets 读写）+ 工具内 OAuth 授权向导",
   "license": "MIT",
   "type": "module",
