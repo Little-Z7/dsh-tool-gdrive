@@ -212,7 +212,8 @@ export class GClient {
 			)
 			data = res.data as ArrayBuffer
 		} else if (isTextualMime(mimeType)) {
-			// Range 预算按 UTF-8 最坏 4 字节/字符放大；用 206 状态判定部分下载，避免 CJK 内容静默截断
+			// Range 预算按 UTF-8 最坏 4 字节/字符放大；用 Content-Range 头判定是否真截断
+			// （Google 对 Range 请求恒回 206，即使整个文件都在返回范围内，不能只看状态码）
 			const res = await this.call(
 				() =>
 					drive.files.get(
@@ -222,8 +223,8 @@ export class GClient {
 				signal
 			)
 			data = res.data as ArrayBuffer
-			partial = res.status === 206
 			byteSize = meta.data.size ? Number(meta.data.size) : undefined
+			partial = computePartial(res.status, res.headers?.['content-range'], typeof res.data === 'string' ? Buffer.byteLength(res.data) : (res.data as ArrayBuffer).byteLength, byteSize)
 		} else {
 			const size = meta.data.size ? Number(meta.data.size) : undefined
 			return {
@@ -266,6 +267,9 @@ export class GClient {
 		const drive = await this.drive()
 		const requestBody: drive_v3.Schema$File = { name: args.name, parents: args.parentId ? [args.parentId] : undefined }
 		let media: drive_v3.Params$Resource$Files$Create['media'] | undefined
+		// Google 工作区类型（document/spreadsheet/presentation）：mimeType 必须放在元数据上才会「上传即转换」，
+		// 只放在 media 上会落成一个 octet-stream 二进制文件
+		const isGoogleType = args.mimeType !== undefined && args.mimeType.startsWith('application/vnd.google-apps.') && args.mimeType !== MIME_FOLDER
 		if (args.mimeType === MIME_FOLDER) {
 			if (args.content !== undefined || args.localPath)
 				throw new GDriveError(
@@ -276,9 +280,17 @@ export class GClient {
 		} else if (args.localPath) {
 			if (args.content !== undefined)
 				throw new GDriveError('content 与 localPath 互斥，只能传一个', '文本内容用 content，本地文件用 localPath')
-			media = { mimeType: args.mimeType ?? 'application/octet-stream', body: createReadStream(args.localPath) }
+			if (isGoogleType) requestBody.mimeType = args.mimeType
+			media = { mimeType: isGoogleType ? 'application/octet-stream' : (args.mimeType ?? 'application/octet-stream'), body: createReadStream(args.localPath) }
 		} else if (args.content !== undefined) {
-			media = { mimeType: args.mimeType ?? 'text/plain; charset=utf-8', body: args.content }
+			if (isGoogleType) {
+				requestBody.mimeType = args.mimeType
+				// 文本内容转 Google 文档/表格：Docs 按纯文本、Sheets 按 CSV 解析
+				const sourceMime = args.mimeType === MIME_SHEET ? 'text/csv' : 'text/plain'
+				media = { mimeType: sourceMime, body: args.content }
+			} else {
+				media = { mimeType: args.mimeType ?? 'text/plain; charset=utf-8', body: args.content }
+			}
 		} else {
 			throw new GDriveError('upload 需要 content（文本）或 localPath（本地文件路径）之一', '新建文件夹请把 mimeType 设为 application/vnd.google-apps.folder')
 		}
@@ -328,7 +340,7 @@ export class GClient {
 	/** 多标签页文档探测：写操作 fail-fast，读操作返回提示。 */
 	private async docTabCount(docs: docs_v1.Docs, documentId: string, signal?: AbortSignal): Promise<number> {
 		const res = await this.call(
-			() => docs.documents.get({ documentId, includeTabsContent: true, fields: 'tabs.tabProperties' }, this.requestOpts(signal)),
+			() => docs.documents.get({ documentId, includeTabsContent: true, fields: 'tabs(tabProperties)' }, this.requestOpts(signal)),
 			signal
 		)
 		return res.data.tabs?.length ?? 0
@@ -376,7 +388,7 @@ export class GClient {
 	async docsReplace(documentId: string, text: string, signal?: AbortSignal): Promise<Record<string, JsonValue>> {
 		const docs = await this.docs()
 		await this.assertSingleTab(docs, documentId, 'replace', signal)
-		const res = await this.call(() => docs.documents.get({ documentId, fields: 'body.content.endIndex' }, this.requestOpts(signal)), signal)
+		const res = await this.call(() => docs.documents.get({ documentId, fields: 'body/content/endIndex' }, this.requestOpts(signal)), signal)
 		const content = res.data.body?.content ?? []
 		const endIndex = content.at(-1)?.endIndex ?? 1
 		const requests: docs_v1.Schema$Request[] = []
@@ -458,6 +470,21 @@ export class GClient {
 		if (updates?.updatedCells != null) out.updatedCells = updates.updatedCells
 		return out
 	}
+}
+
+/**
+ * 判定 Range 下载是否真的只拿到部分内容。
+ * 优先解析 Content-Range（bytes 0-N/total）；缺头时回退到「已收字节数 < 文件总字节数」；
+ * 无法判定时保守按部分处理。
+ */
+function computePartial(status: number, contentRange: unknown, receivedBytes: number, fileSize?: number): boolean {
+	if (status !== 206) return false
+	if (typeof contentRange === 'string') {
+		const m = /bytes\s+\d+-(\d+)\/(\d+)/.exec(contentRange)
+		if (m) return Number(m[1]) + 1 < Number(m[2])
+	}
+	if (fileSize !== undefined) return receivedBytes < fileSize
+	return true
 }
 
 /** 递归提取 Google 文档正文纯文本（段落 + 表格单元格），并附脚注。目录（TOC）属导航冗余，不提取。 */
