@@ -80,6 +80,9 @@ interface PendingFlow {
 	authUrl: string
 	startedAt: number
 	timer: NodeJS.Timeout
+	/** 发起时使用的凭证；凭证变更后旧流程作废。 */
+	clientId?: string
+	clientSecret?: string
 }
 
 export class GDriveAuth {
@@ -168,12 +171,17 @@ export class GDriveAuth {
 		return client
 	}
 
-	/** 启动授权流程：返回授权 URL，本地回调服务后台等待 code；进行中/启动中的流程被复用，无竞态。 */
+	/** 启动授权流程：返回授权 URL，本地回调服务后台等待 code；凭证未变时复用进行中的流程。 */
 	async startAuth(): Promise<{ authUrl: string; port: number; expiresInSec: number }> {
 		this.assertConfigured()
 		if (this.pending) {
-			const left = Math.max(0, Math.round((AUTH_TIMEOUT_MS - (Date.now() - this.pending.startedAt)) / 1000))
-			return { authUrl: this.pending.authUrl, port: this.pending.port, expiresInSec: left }
+			// 凭证已变更：作废旧流程，用新凭证重新发起
+			if (this.pending.clientId !== this.cfg.clientId || this.pending.clientSecret !== this.cfg.clientSecret) {
+				this.closePending()
+			} else {
+				const left = Math.max(0, Math.round((AUTH_TIMEOUT_MS - (Date.now() - this.pending.startedAt)) / 1000))
+				return { authUrl: this.pending.authUrl, port: this.pending.port, expiresInSec: left }
+			}
 		}
 		// ??= 的检查与赋值在同一同步段，并发调用必然复用同一 promise
 		this.inflight ??= this.startAuthInner().finally(() => {
@@ -253,7 +261,7 @@ export class GDriveAuth {
 					state
 				})
 				const timer = setTimeout(() => this.closePending(), AUTH_TIMEOUT_MS)
-				this.pending = { server, port, authUrl, startedAt: Date.now(), timer }
+				this.pending = { server, port, authUrl, startedAt: Date.now(), timer, clientId: this.cfg.clientId, clientSecret: this.cfg.clientSecret }
 				resolve({ authUrl, port, expiresInSec: AUTH_TIMEOUT_MS / 1000 })
 			})
 		})

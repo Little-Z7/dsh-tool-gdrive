@@ -39,7 +39,7 @@ export declare class GDriveAuth {
     ensureClient(opts?: {
         signal?: AbortSignal;
     }): Promise<OAuth2Client>;
-    /** 启动授权流程：返回授权 URL，本地回调服务后台等待 code；进行中/启动中的流程被复用，无竞态。 */
+    /** 启动授权流程：返回授权 URL，本地回调服务后台等待 code；凭证未变时复用进行中的流程。 */
     startAuth(): Promise<{
         authUrl: string;
         port: number;
