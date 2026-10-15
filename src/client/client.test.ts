@@ -37,7 +37,11 @@ class FakeForm {
 		return { text: '', overridden: false, invalid: false }
 	}
 	actions() {
-		return { edit() {}, resetField() {}, save: () => formState.saveResult, discard() {} }
+		return { edit() {}, resetField() {}, save: () => undefined, discard() {} }
+	}
+	/** 有 Promise 契约的公开 save()：0.2.0-rc.2 的 actions().save() 返回 void，真正的 Promise 在这里。 */
+	save() {
+		return formState.saveResult ?? Promise.resolve()
 	}
 	dispose() {}
 }
@@ -284,7 +288,8 @@ test('client：save 动作外包一层——保存的 Promise 没落定前检查
 	const actions = row.inject!() as { save: () => unknown }
 	let done!: () => void
 	formState.saveResult = new Promise<void>((resolve) => (done = resolve))
-	actions.save() // 表单快照里的 saving 始终是 false，只有外包层知道保存在路上
+	assert.equal(actions.save(), undefined, '宿主的 actions().save() 契约是 void')
+	// 表单快照里的 saving 始终是 false，只有外包层（包的是 form.save()）知道保存在路上
 	const pending = (h.face().checkUpdate as (v: string) => Promise<unknown>)('0.2.6')
 	await tick()
 	assert.deepEqual(h.fetched, [], '保存的 Promise 没落定，不能请求')

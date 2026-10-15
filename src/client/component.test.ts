@@ -455,3 +455,57 @@ test('UpdateAction：上次保存没成功时，结果旁边有提示（正文�
 	assert.deepEqual(texts, ['updateSaveFailedNote', 'updateLatest{"version":"0.2.6"}'])
 	view.unmount()
 })
+
+test('UpdateAction：卸载之后的站点通知不发起检查、不 setState（安装收尾后 / checking / checked 状态下卸载）', async () => {
+	const UpdateAction = await loadComponent()
+	const make = () => {
+		let notify: () => void = () => {}
+		const resolvers: Array<(c: UpdateCheck) => void> = []
+		const installs: Array<(o: InstallOutcome) => void> = []
+		const base = props({
+			checkUpdate: () => new Promise<UpdateCheck>((resolve) => resolvers.push(resolve)),
+			installUpdate: () => new Promise<InstallOutcome>((resolve) => installs.push(resolve)),
+			watchSite: (l: () => void) => {
+				notify = l
+				return () => {}
+			}
+		})
+		return { notify: () => notify(), resolvers, installs, props: base.props }
+	}
+	// 1) 安装结果已收尾（先 flush）后卸载，再通知
+	lateSetStates = 0
+	let c = make()
+	let view = mount(UpdateAction, c.props)
+	await flush()
+	c.resolvers[0]!(AVAILABLE)
+	await flush()
+	;(buttons(view.tree())[0]!.props.onClick as () => void)()
+	await flush()
+	c.installs[0]!({ kind: 'restart' })
+	await flush()
+	view.unmount()
+	c.notify()
+	await flush()
+	assert.equal(c.resolvers.length, 1, '卸载后通知不发起检查')
+	assert.equal(lateSetStates, 0)
+	// 2) checking 状态卸载后再通知
+	c = make()
+	view = mount(UpdateAction, c.props)
+	await flush()
+	view.unmount()
+	c.notify()
+	await flush()
+	assert.equal(c.resolvers.length, 1)
+	assert.equal(lateSetStates, 0)
+	// 3) checked 状态卸载后再通知
+	c = make()
+	view = mount(UpdateAction, c.props)
+	await flush()
+	c.resolvers[0]!(AVAILABLE)
+	await flush()
+	view.unmount()
+	c.notify()
+	await flush()
+	assert.equal(c.resolvers.length, 1)
+	assert.equal(lateSetStates, 0)
+})

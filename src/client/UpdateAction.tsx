@@ -88,6 +88,7 @@ export function UpdateAction({ subject, t, checkUpdate, installUpdate, inflight,
 	}, [])
 
 	const check = (): void => {
+		if (!live.current) return
 		/* 新的一次检查作废上一次（包括它还在等配置）。 */
 		running.current?.abort()
 		const ctl = new AbortController()
@@ -123,7 +124,7 @@ export function UpdateAction({ subject, t, checkUpdate, installUpdate, inflight,
 		/* 已接受的市场地址变了：作废当前结果、重新检查（安装进行中不打断）。 */
 		if (!own || !watchSite) return
 		return watchSite(() => {
-			if (!installing.current) check()
+			if (live.current && !installing.current) check()
 		})
 	}, [own, installed])
 

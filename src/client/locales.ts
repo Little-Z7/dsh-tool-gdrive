@@ -78,7 +78,7 @@ export const en = {
 	updateReasonInstall: '{text}',
 	updateReasonConfigLoading: 'The settings of this plugin cannot be read yet. Click Retry in a moment.',
 	updateReasonUnexpected: 'Unexpected error: {message}',
-	updateSaveFailedNote: 'The last save of the market URL did not go through; this result uses the previously saved address.'
+	updateSaveFailedNote: 'The last settings save did not fully succeed; this check uses the market URL currently in effect.'
 }
 
 export const zh = {
@@ -154,5 +154,5 @@ export const zh = {
 	updateReasonInstall: '{text}',
 	updateReasonConfigLoading: '还读不到本插件的配置，稍后点重试',
 	updateReasonUnexpected: '出现意外错误：{message}',
-	updateSaveFailedNote: '上次保存市场地址没有成功，以下是按已保存的旧地址检查的结果'
+	updateSaveFailedNote: '上次配置保存没有完全成功，本次按当前已生效的市场地址检查'
 }

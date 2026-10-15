@@ -128,6 +128,7 @@ export class GdriveFormController {
 	/**
 	 * 保存状态，给「检查更新」用：表单模型的 `saving` / `failed`（经它发布的快照读，随快照变化订阅），
 	 * 加上 save 动作外包一层记下的「保存进行中」。保存没落定之前，宿主「最后接受」的值还是旧的。
+	 * 注意 `failed` 是整张表单的保存结果（宿主先提交普通字段、再写 secret），不是 marketUrl 单个字段的结果。
 	 */
 	readonly saveWatch: SaveWatch = {
 		getSnapshot: () => {
@@ -144,23 +145,26 @@ export class GdriveFormController {
 		}
 	}
 
+	private async trackedSave(): Promise<void> {
+		this.explicitSaves++
+		this.notifySave()
+		try {
+			await this.form.save()
+		} finally {
+			this.explicitSaves--
+			this.notifySave()
+		}
+	}
+
 	inject() {
 		const actions = this.form.actions()
 		return {
 			hooks: { gdriveForm: this.store },
 			...actions,
+			/* 0.2.0-rc.2 的 `actions().save()` 返回 void（内部 `this.save()` 的 Promise 被丢掉），
+			 * 所以这里包的是有 Promise 契约的 `form.save()`：开始前计数，finally 里归还。 */
 			save: () => {
-				const result = actions.save() as unknown
-				if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
-					this.explicitSaves++
-					this.notifySave()
-					const done = () => {
-						this.explicitSaves--
-						this.notifySave()
-					}
-					;(result as PromiseLike<unknown>).then(done, done)
-				}
-				return result as void
+				void this.trackedSave()
 			}
 		}
 	}
