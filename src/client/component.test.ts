@@ -20,19 +20,23 @@ interface Handle {
 	idx: number
 	effects: Array<() => void>
 	render: () => void
+	unmounted: boolean
 }
 let current: Handle | null = null
+let lateSetStates = 0
 
 const useState = <T>(initial: T): [T, (v: T) => void] => {
 	const h = current!
 	const i = h.idx++
 	if (!(i in h.hooks)) {
-		h.hooks[i] = { value: initial, render: h.render }
+		h.hooks[i] = { value: initial, render: h.render, handle: h }
 	}
 	const slot = h.hooks[i] as { value: T; render: () => void }
 	return [
 		slot.value,
 		(v: T) => {
+			/* 卸载后还有人调 setState（迟到的结果没被拦住）就记一次。 */
+			if (h.unmounted) lateSetStates++
 			if (!Object.is(slot.value, v)) {
 				slot.value = v
 				slot.render()
@@ -63,7 +67,7 @@ const jsx = (type: unknown, props: Record<string, unknown>): El => ({ type, prop
 
 function mount(Component: (props: any) => El | null, initialProps: Record<string, unknown>) {
 	let props = initialProps
-	const handle: Handle = { hooks: [], idx: 0, effects: [], render: () => render() }
+	const handle: Handle = { hooks: [], idx: 0, effects: [], render: () => render(), unmounted: false }
 	let tree: El | null = null
 	let rendering = false
 	let dirty = false
@@ -100,6 +104,7 @@ function mount(Component: (props: any) => El | null, initialProps: Record<string
 		},
 		unmount: () => {
 			unmounted = true
+			handle.unmounted = true
 			for (const slot of handle.hooks as Array<{ cleanup?: void | (() => void) }>) if (slot && typeof slot.cleanup === 'function') slot.cleanup()
 		}
 	}
@@ -151,10 +156,10 @@ async function loadComponent(): Promise<(props: any) => El | null> {
 
 const t = (key: string, params?: Record<string, string | number>): string => (params && Object.keys(params).length > 0 ? `${key}${JSON.stringify(params)}` : key)
 const own = (enabled?: boolean) => ({ kind: 'bundle', pkg: { name: 'dsh-tool-gdrive', version: '0.2.6', installed: true, ...(enabled === undefined ? {} : { enabled }) } })
-const AVAILABLE: UpdateCheck = { kind: 'available', version: '0.2.7', url: 'http://127.0.0.1:1/dsh-market/x.tgz' }
+const AVAILABLE = { kind: 'available', version: '0.2.7', url: 'http://127.0.0.1:1/dsh-market/x.tgz', origin: 'http://127.0.0.1:1' } as const satisfies UpdateCheck
 
 function props(over: Record<string, unknown> = {}) {
-	const calls = { check: [] as Array<string | undefined>, signals: [] as Array<AbortSignal | undefined>, install: [] as Array<[string, string, boolean]> }
+	const calls = { check: [] as Array<string | undefined>, signals: [] as Array<AbortSignal | undefined>, install: [] as Array<[string, string, boolean, string]> }
 	const base = {
 		subject: own(true),
 		t,
@@ -163,8 +168,8 @@ function props(over: Record<string, unknown> = {}) {
 			calls.signals.push(signal)
 			return Promise.resolve(AVAILABLE)
 		},
-		installUpdate: (url: string, version: string, enabled: boolean): Promise<InstallOutcome> => {
-			calls.install.push([url, version, enabled])
+		installUpdate: (url: string, version: string, enabled: boolean, origin: string): Promise<InstallOutcome> => {
+			calls.install.push([url, version, enabled, origin])
 			return Promise.resolve({ kind: 'restart' })
 		},
 		restartPending: () => false
@@ -185,7 +190,7 @@ test('UpdateAction：subject.pkg.enabled 为 false / true / undefined 时，点�
 		assert.equal(textOf(button), 'updateInstall{"version":"0.2.7"}')
 		;(button!.props.onClick as () => void)()
 		await flush()
-		assert.deepEqual(calls.install, [[AVAILABLE.url, '0.2.7', expected]], `enabled=${String(enabled)}`)
+		assert.deepEqual(calls.install, [[AVAILABLE.url, '0.2.7', expected, AVAILABLE.origin]], `enabled=${String(enabled)}`)
 		assert.equal(textOf(statuses(view.tree())[0]), 'updateDoneRestart{"version":"0.2.7"}')
 		view.unmount()
 	}
@@ -264,6 +269,7 @@ test('UpdateAction：卸载与新一次检查会作废上一次（signal 被中�
 			return new Promise<UpdateCheck>((resolve) => resolvers.push(resolve))
 		}
 	})
+	lateSetStates = 0
 	const view = mount(UpdateAction, p)
 	await flush()
 	assert.equal(calls.check.length, 1)
@@ -273,6 +279,7 @@ test('UpdateAction：卸载与新一次检查会作废上一次（signal 被中�
 	resolvers[0]!(AVAILABLE)
 	await flush()
 	assert.equal(textOf(buttons(view.tree())[0]), 'updateChecking', '卸载后迟到的结果不写回')
+	assert.equal(lateSetStates, 0, '卸载后不许再有 setState')
 })
 
 test('UpdateAction：错误颜色在浏览器支持 color-mix 时用 color-mix，不支持时退回带回退值的 token 颜色', async () => {
@@ -327,5 +334,124 @@ test('UpdateAction：已装版本变了会再查一次，较早那次迟到的�
 	resolvers[0]!(AVAILABLE)
 	await flush()
 	assert.equal(textOf(statuses(view.tree())[0]), 'updateLatest{"version":"0.2.7"}', '迟到的旧结果不能盖掉新结果')
+	view.unmount()
+})
+
+// ───────────────────────── 第二轮返工 ─────────────────────────
+
+test('UpdateAction：卸载之后没有任何 setState（迟到的检查、安装、站点变化都被拦住）', async () => {
+	const UpdateAction = await loadComponent()
+	lateSetStates = 0
+	const checks: Array<(c: UpdateCheck) => void> = []
+	const installs: Array<(o: InstallOutcome) => void> = []
+	let notify: () => void = () => {}
+	const p = props({
+		checkUpdate: () => new Promise<UpdateCheck>((resolve) => checks.push(resolve)),
+		installUpdate: () => new Promise<InstallOutcome>((resolve) => installs.push(resolve)),
+		watchSite: (l: () => void) => {
+			notify = l
+			return () => void unmounted++
+		}
+	})
+	let unmounted = 0
+	const view = mount(UpdateAction, p.props)
+	await flush()
+	checks[0]!(AVAILABLE)
+	await flush()
+	;(buttons(view.tree())[0]!.props.onClick as () => void)()
+	await flush()
+	view.unmount()
+	assert.equal(unmounted, 1, '卸载要撤掉站点订阅')
+	installs[0]!({ kind: 'restart' })
+	notify()
+	checks.forEach((r) => r(AVAILABLE))
+	await flush()
+	assert.equal(lateSetStates, 0, '卸载后不许再有 setState')
+})
+
+test('UpdateAction：已接受的市场地址变了 → 作废当前结果并重新检查；安装进行中不打断', async () => {
+	const UpdateAction = await loadComponent()
+	let notify: () => void = () => {}
+	let n = 0
+	const installResolvers: Array<(o: InstallOutcome) => void> = []
+	const { props: p } = props({
+		checkUpdate: (_i?: string, signal?: AbortSignal) => {
+			n++
+			void signal
+			return Promise.resolve(AVAILABLE as UpdateCheck)
+		},
+		watchSite: (l: () => void) => {
+			notify = l
+			return () => {}
+		},
+		installUpdate: () => new Promise<InstallOutcome>((resolve) => installResolvers.push(resolve))
+	})
+	const view = mount(UpdateAction, p)
+	await flush()
+	assert.equal(n, 1)
+	notify()
+	await flush()
+	assert.equal(n, 2, '地址变了要重新检查')
+	;(buttons(view.tree())[0]!.props.onClick as () => void)()
+	await flush()
+	notify()
+	await flush()
+	assert.equal(n, 2, '安装进行中不重新检查')
+	installResolvers[0]!({ kind: 'restart' })
+	await flush()
+	assert.equal(textOf(statuses(view.tree())[0]), 'updateDoneRestart{"version":"0.2.7"}')
+	view.unmount()
+})
+
+test('UpdateAction：点更新时站点已变（stale）→ 不安装，改为重新检查，并把检查结果的 origin 交给 installUpdate', async () => {
+	const UpdateAction = await loadComponent()
+	let n = 0
+	const seen: string[] = []
+	const { props: p } = props({
+		checkUpdate: () => {
+			n++
+			return Promise.resolve({ ...AVAILABLE, origin: n === 1 ? 'http://127.0.0.1:1' : 'http://127.0.0.1:2', url: `http://127.0.0.1:${n === 1 ? 1 : 2}/dsh-market/x.tgz` } as UpdateCheck)
+		},
+		installUpdate: (_u: string, _v: string, _e: boolean, origin: string) => {
+			seen.push(origin)
+			return Promise.resolve({ kind: 'stale' } as InstallOutcome)
+		}
+	})
+	const view = mount(UpdateAction, p)
+	await flush()
+	;(buttons(view.tree())[0]!.props.onClick as () => void)()
+	await flush()
+	assert.deepEqual(seen, ['http://127.0.0.1:1'])
+	assert.equal(n, 2, 'stale 后要重新检查')
+	assert.equal(textOf(buttons(view.tree())[0]), 'updateInstall{"version":"0.2.7"}')
+	assert.equal(statuses(view.tree()).length, 0, 'stale 不显示成安装结果')
+	view.unmount()
+})
+
+test('UpdateAction：挂载时已有安装在进行 → 显示「正在安装 x…」并等同一个结果，不发起检查也不再装', async () => {
+	const UpdateAction = await loadComponent()
+	let resolve!: (o: InstallOutcome) => void
+	const promise = new Promise<InstallOutcome>((r) => (resolve = r))
+	const { calls, props: p } = props({ inflight: () => ({ version: '0.2.8', promise }) })
+	const view = mount(UpdateAction, p)
+	await flush()
+	assert.deepEqual(calls.check, [], '有安装在进行时不发起检查')
+	assert.equal(textOf(buttons(view.tree())[0]), 'updateInstalling{"version":"0.2.8"}')
+	assert.equal(buttons(view.tree())[0]!.props.disabled, true)
+	assert.deepEqual(calls.install, [])
+	resolve({ kind: 'restart' })
+	await flush()
+	assert.equal(textOf(statuses(view.tree())[0]), 'updateDoneRestart{"version":"0.2.8"}')
+	assert.deepEqual(calls.install, [])
+	view.unmount()
+})
+
+test('UpdateAction：上次保存没成功时，结果旁边有提示（正文元素里），不静默显示成正常', async () => {
+	const UpdateAction = await loadComponent()
+	const { props: p } = props({ checkUpdate: () => Promise.resolve({ kind: 'latest', version: '0.2.6', saveFailed: true } as UpdateCheck) })
+	const view = mount(UpdateAction, p)
+	await flush()
+	const texts = statuses(view.tree()).map(textOf)
+	assert.deepEqual(texts, ['updateSaveFailedNote', 'updateLatest{"version":"0.2.6"}'])
 	view.unmount()
 })

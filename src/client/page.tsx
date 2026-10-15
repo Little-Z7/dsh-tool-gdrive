@@ -16,7 +16,7 @@ import {
 	type SettingsFormScope,
 	type TagTone
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { DEFAULT_MARKET_URL, marketSite } from './update.js'
+import { DEFAULT_MARKET_URL, marketSite, type SaveWatch } from './update.js'
 
 type T = (key: string) => string
 
@@ -117,8 +117,52 @@ export class GdriveFormController {
 		}
 	}
 
+	/** 进行中的保存数（包在 save 动作外面记的：宿主表单模型没把 saving 暴露成可订阅的值时也有据可依）。 */
+	private explicitSaves = 0
+	private readonly saveListeners = new Set<() => void>()
+
+	private notifySave(): void {
+		for (const listener of [...this.saveListeners]) listener()
+	}
+
+	/**
+	 * 保存状态，给「检查更新」用：表单模型的 `saving` / `failed`（经它发布的快照读，随快照变化订阅），
+	 * 加上 save 动作外包一层记下的「保存进行中」。保存没落定之前，宿主「最后接受」的值还是旧的。
+	 */
+	readonly saveWatch: SaveWatch = {
+		getSnapshot: () => {
+			const shell = this.store.getSnapshot() as { saving?: boolean; failed?: boolean }
+			return { saving: this.explicitSaves > 0 || shell.saving === true, failed: shell.failed === true }
+		},
+		subscribe: (listener) => {
+			this.saveListeners.add(listener)
+			const off = this.store.subscribe(listener)
+			return () => {
+				this.saveListeners.delete(listener)
+				off()
+			}
+		}
+	}
+
 	inject() {
-		return { hooks: { gdriveForm: this.store }, ...this.form.actions() }
+		const actions = this.form.actions()
+		return {
+			hooks: { gdriveForm: this.store },
+			...actions,
+			save: () => {
+				const result = actions.save() as unknown
+				if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+					this.explicitSaves++
+					this.notifySave()
+					const done = () => {
+						this.explicitSaves--
+						this.notifySave()
+					}
+					;(result as PromiseLike<unknown>).then(done, done)
+				}
+				return result as void
+			}
+		}
 	}
 
 	dispose() {

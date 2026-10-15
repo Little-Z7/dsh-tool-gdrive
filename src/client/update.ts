@@ -15,7 +15,7 @@
  * 出 ERR_PNPM_TARBALL_INTEGRITY。带上包名后 pnpm 直接替换这一条依赖，不再碰旧地址。
  * DSH 的 parseInstallSpec 把它当带版本范围的 registry 写法，装完按「package.json 里哪个依赖变了」认包。
  */
-import type { InstallResult, PluginManagerRemote } from './contract.js'
+import type { InstallResult, PluginManagerRemote, RemoteResult } from './contract.js'
 
 export const PLUGIN_NAME = 'dsh-tool-gdrive'
 /** 缺省市场地址只在这里写一处。 */
@@ -24,7 +24,9 @@ export const INDEX_PATH = '/dsh-market/index.json'
 export const ARCHIVE_PATH = '/dsh-market/'
 export const CHECK_TIMEOUT_MS = 15000
 export const RESTART_KEY = 'dsh-tool-gdrive.restart-pending'
+export const INFLIGHT_KEY = 'dsh-tool-gdrive.install-inflight'
 export const WINDOW_STORE_NAME = 'dsh-tool-gdrive.window-store'
+export const WINDOW_INSTALLS_NAME = 'dsh-tool-gdrive.window-installs'
 
 /** 失败原因：代码 + 参数，由界面翻译成中英文（见 reasonMessage）。 */
 export type Failure =
@@ -165,10 +167,15 @@ export function parseMarketIndex(raw: unknown): Parsed {
 
 // ───────────────────────── 检查 ─────────────────────────
 
-export type UpdateCheck =
+/**
+ * `available` 带上它读的站点 origin：点「更新到 x」时若当前已接受的站点已经变了，就不装，改为重新检查。
+ * `saveFailed`：检查时配置表单上一次保存没有成功，这次读的是旧的已接受地址（界面据此提示，不静默显示成正常）。
+ */
+export type UpdateCheck = (
 	| { kind: 'latest'; version: string }
-	| { kind: 'available'; version: string; url: string }
+	| { kind: 'available'; version: string; url: string; origin: string }
 	| { kind: 'failed'; failure: Failure }
+) & { saveFailed?: boolean }
 
 export type FetchInit = {
 	cache: 'no-store'
@@ -214,6 +221,8 @@ async function runCheck(
 	const site = marketSite(rawSite)
 	if (!site.ok) return { kind: 'failed', failure: { code: 'bad-site', value: site.value } }
 	const origin = site.origin
+	/* 已被作废（卸载 / 新的检查）就不发请求。 */
+	if (options.signal?.aborted) return { kind: 'failed', failure: { code: 'cancelled' } }
 	const timeoutMs = options.timeoutMs ?? CHECK_TIMEOUT_MS
 	const ctl = new AbortController()
 	const onAbort = () => ctl.abort()
@@ -258,7 +267,7 @@ async function runCheck(
 			/* 已装版本不低于市场 latest：显示已装的，不显示市场上更旧的版本号。 */
 			return { kind: 'latest', version: installed }
 		}
-		return { kind: 'available', version, url: origin + ARCHIVE_PATH + file }
+		return { kind: 'available', version, url: origin + ARCHIVE_PATH + file, origin }
 	} finally {
 		if (timer !== undefined) clearTimeout(timer)
 		options.signal?.removeEventListener('abort', onAbort)
@@ -269,55 +278,110 @@ async function runCheck(
 
 export const CONFIG_WAIT_MS = 10000
 
-/** 配置节的最小形状（SettingsFormScope 的子集）。 */
+/** 配置节的最小形状（SettingsFormScope 的子集）；`value` 是宿主「最后接受」的值。 */
 export interface ConfigScope {
 	getSnapshot(): { status: 'loading' | 'ready' | 'unavailable'; value: { marketUrl?: unknown } | undefined }
 	subscribe(listener: () => void): () => void
 }
 
 /**
- * 取市场地址的配置值。快照还在 loading 时等它离开 loading（subscribe，`timeoutMs` 上限，`signal` 可作废），
- * 不能把「还没读到」当成「没配」去请求缺省市场。就绪后按当时的值；宿主不提供这节配置（unavailable）才用缺省。
- * 超时或被作废返回 `{ ok: false }`，调用方不发请求。
+ * 配置表单的保存状态（来自本插件的表单控制器）。快照里的 `value` 只在宿主接受之后才变，
+ * 保存还在路上时它仍是旧值（没配过就是缺省），所以检查要等「没有正在进行的保存」。
+ * `failed`：上一次保存没有按所填的落下（下一次编辑或保存才清除）。
+ */
+export interface SaveWatch {
+	getSnapshot(): { saving: boolean; failed: boolean }
+	subscribe(listener: () => void): () => void
+}
+
+export type ConfigWait = { ok: true; raw: unknown; saveFailed: boolean } | { ok: false }
+
+/**
+ * 取市场地址的配置值。要等两件事：快照离开 loading，且表单没有正在进行的保存
+ * （一个等待，共用 `timeoutMs` 上限与 `signal` 作废）；不能把「还没读到 / 还没存完」当成「没配」去请求缺省市场。
+ * 就绪后按当时已接受的值；宿主不提供这节配置（unavailable）才用缺省。保存失败时按旧的已接受值继续，
+ * 并在结果里带 `saveFailed`。超时或被作废返回 `{ ok: false }`，调用方不发请求。
  */
 export function waitForMarketUrl(
 	scope: ConfigScope,
-	options: { timeoutMs?: number; signal?: AbortSignal } = {}
-): Promise<{ ok: true; raw: unknown } | { ok: false }> {
-	const read = (): { ok: true; raw: unknown } | undefined => {
+	options: { timeoutMs?: number; signal?: AbortSignal; save?: SaveWatch } = {}
+): Promise<ConfigWait> {
+	const { signal, save } = options
+	const read = (): ConfigWait | undefined => {
 		const snap = scope.getSnapshot()
-		return snap.status === 'loading' ? undefined : { ok: true, raw: snap.status === 'ready' ? snap.value?.marketUrl : undefined }
+		if (snap.status === 'loading') return undefined
+		const state = save?.getSnapshot()
+		if (state?.saving) return undefined
+		return { ok: true, raw: snap.status === 'ready' ? snap.value?.marketUrl : undefined, saveFailed: state?.failed === true }
 	}
+	if (signal?.aborted) return Promise.resolve({ ok: false })
 	const now = read()
 	if (now) return Promise.resolve(now)
 	return new Promise((resolve) => {
 		let done = false
-		let off: (() => void) | undefined
+		const offs: Array<() => void> = []
 		let timer: ReturnType<typeof setTimeout> | undefined
-		const finish = (result: { ok: true; raw: unknown } | { ok: false }) => {
+		const finish = (result: ConfigWait) => {
 			if (done) return
 			done = true
 			if (timer !== undefined) clearTimeout(timer)
-			options.signal?.removeEventListener('abort', onAbort)
-			off?.()
+			signal?.removeEventListener('abort', onAbort)
+			for (const off of offs.splice(0)) off()
 			resolve(result)
 		}
 		const onAbort = () => finish({ ok: false })
-		if (options.signal?.aborted) return finish({ ok: false })
-		options.signal?.addEventListener('abort', onAbort, { once: true })
-		timer = setTimeout(() => finish({ ok: false }), options.timeoutMs ?? CONFIG_WAIT_MS)
-		off = scope.subscribe(() => {
+		const onChange = () => {
 			const r = read()
 			if (r) finish(r)
-		})
-		const again = read()
-		if (again) finish(again)
+		}
+		signal?.addEventListener('abort', onAbort, { once: true })
+		timer = setTimeout(() => finish({ ok: false }), options.timeoutMs ?? CONFIG_WAIT_MS)
+		for (const source of [scope, save]) {
+			if (!source) continue
+			/* 订阅时监听器可能被同步调用：拿到撤销函数后若已经结束，立刻撤掉，不留订阅。 */
+			const off = source.subscribe(onChange)
+			if (done) off()
+			else offs.push(off)
+		}
+		onChange()
+	})
+}
+
+/** 站点配置值的比较键：没配与空串同为缺省；不合格的按原文区分。 */
+function siteKey(raw: unknown): string {
+	const site = marketSite(raw)
+	return site.ok ? `ok:${site.origin}` : `bad:${site.value}`
+}
+
+/** 当前已接受的站点是不是结果当时读的那个 origin（不是就不能装它给的地址）。 */
+export function sameSite(raw: unknown, origin: string): boolean {
+	const site = marketSite(raw)
+	return site.ok && site.origin === origin
+}
+
+/**
+ * 已接受的市场地址变了就通知（订阅快照）。第一次读到值只记下，不算变化；loading 期间不算。
+ * 用来作废当前的检查结果并重新检查。
+ */
+export function watchMarketUrl(scope: ConfigScope, onChange: () => void): () => void {
+	const current = (): string | undefined => {
+		const snap = scope.getSnapshot()
+		return snap.status === 'loading' ? undefined : siteKey(snap.status === 'ready' ? snap.value?.marketUrl : undefined)
+	}
+	let last = current()
+	return scope.subscribe(() => {
+		const now = current()
+		if (now === undefined) return
+		const changed = last !== undefined && last !== now
+		last = now
+		if (changed) onChange()
 	})
 }
 
 // ───────────────────────── 安装 ─────────────────────────
 
-export type InstallOutcome = { kind: 'restart' } | { kind: 'applied' } | { kind: 'failed'; failure: Failure }
+/** `stale`：点击时已接受的市场地址与检查结果读的不是同一个站点，没有安装，调用方应当重新检查。 */
+export type InstallOutcome = { kind: 'restart' } | { kind: 'applied' } | { kind: 'failed'; failure: Failure } | { kind: 'stale' }
 
 /** 交给 DSH 插件管理的安装写法：带包名的远程包（原因见文件头）。 */
 export function updateSpec(url: string): string {
@@ -340,10 +404,21 @@ export async function installUpdate(
 	enabled: boolean,
 	requestId: string = newRequestId()
 ): Promise<InstallOutcome> {
-	let answer = await manager.installBundle(updateSpec(url), { enabled, requestId })
+	/* 两个远程调用都可能 reject（不只是回 `ok:false`）：在这里归一化，调用方永远拿到一个结果。 */
+	let answer: RemoteResult<InstallResult>
+	try {
+		answer = await manager.installBundle(updateSpec(url), { enabled, requestId })
+	} catch (e) {
+		answer = { ok: false, error: { code: 'rejected', message: errorMessage(e) } }
+	}
 	if (!answer.ok) {
-		const recovered = await manager.waitForInstall(requestId)
-		if (recovered.ok && recovered.value) answer = { ok: true, value: recovered.value }
+		let recovered: RemoteResult<InstallResult | null> | undefined
+		try {
+			recovered = await manager.waitForInstall(requestId)
+		} catch {
+			recovered = undefined
+		}
+		if (recovered?.ok && recovered.value) answer = { ok: true, value: recovered.value }
 		else return { kind: 'failed', failure: { code: 'install', text: clampReason(answer.error.message || answer.error.code) } }
 	}
 	const result = answer.value
@@ -443,22 +518,75 @@ export function clearRestartPending(store: KeyValueStore | undefined): void {
 export function restartPending(store: KeyValueStore | undefined, installed: string | undefined): boolean {
 	if (installed === undefined) return false
 	try {
-		return store?.getItem(RESTART_KEY) === installed
+		return store?.getItem(RESTART_KEY) === installed || store?.getItem(INFLIGHT_KEY) === installed
 	} catch {
 		return false
 	}
 }
 
-/**
- * 一次安装收尾后的待重启记录：装之前先记下旧记录值再写入新版本，
- * 结果为 restart 保留新记录；applied 清除；failed / cancelled 恢复旧值（旧值不存在才删除），
- * 不能把更早一次仍有效的「待重启」记录一并删掉。
- */
-export function settleRestartPending(store: KeyValueStore | undefined, previous: string | null, outcome: InstallOutcome): void {
-	if (outcome.kind === 'restart') return
-	if (outcome.kind === 'applied' || previous === null) {
-		clearRestartPending(store)
-		return
+// ───────────────────────── 安装状态机 ─────────────────────────
+//
+// window 上共享三样东西（Symbol 名与键名跨版本不能改，0.2.6 之后的版本要读得懂）：
+//
+//   RESTART_KEY    「已确认」的待重启版本。只在安装结果确认为 restart 时写入；安装失败 / 取消 / 拒绝都不碰它；
+//                  applied（已经热生效，不需要重启）时清除。所以已确认的 0.2.7 不会被一次失败的 0.2.8 抹掉。
+//   INFLIGHT_KEY   「进行中」的目标版本。安装前写入、无论成败都在收尾时删除。
+//                  存它是因为装成功的那一刻 DSH 就热替换浏览器半侧：新页面里的组件已经没有旧组件的状态，
+//                  而旧模块的收尾代码不一定来得及跑 —— 新页面若看到「进行中的目标版本 == 盘上版本」，就说明已装上，
+//                  按「已确认」处理（restartPending 两个键都认）。
+//   registry       唯一的进行中安装（含它的 Promise）。已有安装在进行时，新挂载的组件或再次点击不再发起新安装，
+//                  拿同一个 Promise 等同一个结果（runInstall 直接返回它）。热替换不换文档，registry 留得下来。
+//
+// 状态流：idle → 写 INFLIGHT、登记 registry → installBundle →
+//   restart  : 删 INFLIGHT、写 RESTART_KEY（升为已确认）
+//   applied  : 删 INFLIGHT、清 RESTART_KEY
+//   failed / cancelled / reject : 删 INFLIGHT，RESTART_KEY 不变
+// 收尾在 finally 里，registry 一定被释放。
+
+export interface InflightInstall {
+	requestId: string
+	version: string
+	promise: Promise<InstallOutcome>
+}
+
+/** 唯一的进行中安装的登记处（挂在 window 上，见 index.tsx）。 */
+export interface InstallRegistry {
+	current?: InflightInstall
+}
+
+export function runInstall(
+	registry: InstallRegistry,
+	store: KeyValueStore | undefined,
+	manager: PluginManagerRemote,
+	url: string,
+	version: string,
+	enabled: boolean
+): Promise<InstallOutcome> {
+	if (registry.current) return registry.current.promise
+	const requestId = newRequestId()
+	try {
+		store?.setItem(INFLIGHT_KEY, version)
+	} catch {
+		/* 存不进去：只是少一句提示 */
 	}
-	markRestartPending(store, previous)
+	const promise = (async (): Promise<InstallOutcome> => {
+		let outcome: InstallOutcome = { kind: 'failed', failure: { code: 'unexpected', message: 'install did not finish' } }
+		try {
+			outcome = await installUpdate(manager, url, enabled, requestId)
+		} catch (e) {
+			outcome = { kind: 'failed', failure: { code: 'unexpected', message: errorMessage(e) } }
+		} finally {
+			registry.current = undefined
+			try {
+				store?.removeItem(INFLIGHT_KEY)
+			} catch {
+				/* 同上 */
+			}
+			if (outcome.kind === 'restart') markRestartPending(store, version)
+			else if (outcome.kind === 'applied') clearRestartPending(store)
+		}
+		return outcome
+	})()
+	registry.current = { requestId, version, promise }
+	return promise
 }

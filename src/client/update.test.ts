@@ -20,7 +20,12 @@ import {
 	parseMarketIndex,
 	reasonMessage,
 	restartPending,
-	settleRestartPending,
+	INFLIGHT_KEY,
+	runInstall,
+	sameSite,
+	watchMarketUrl,
+	type InstallRegistry,
+	type SaveWatch,
 	updateSpec,
 	waitForMarketUrl,
 	type ConfigScope,
@@ -132,7 +137,7 @@ function fakeFetch(body: unknown, status = 200) {
 test('checkUpdate：请求地址与请求头，可更新给出版本化地址', async () => {
 	const { impl, calls } = fakeFetch(index())
 	const r = await checkUpdate(impl, 'http://127.0.0.1:8765/', '0.2.6')
-	assert.deepEqual(r, { kind: 'available', version: '0.2.7', url: `http://127.0.0.1:8765${ARCHIVE_PATH}${FILE}` })
+	assert.deepEqual(r, { kind: 'available', version: '0.2.7', url: `http://127.0.0.1:8765${ARCHIVE_PATH}${FILE}`, origin: 'http://127.0.0.1:8765' })
 	assert.equal(calls.length, 1)
 	assert.equal(calls[0]!.url, 'http://127.0.0.1:8765' + INDEX_PATH)
 	assert.equal(calls[0]!.init.cache, 'no-store')
@@ -363,16 +368,16 @@ function fakeScope(initial: 'loading' | 'ready' | 'unavailable', value?: { marke
 }
 
 test('waitForMarketUrl：就绪直接给值；loading → ready 取到自定义值；unavailable 才用缺省；订阅总会取消', async () => {
-	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', { marketUrl: 'http://127.0.0.1:8765' }).scope), { ok: true, raw: 'http://127.0.0.1:8765' })
-	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', {}).scope), { ok: true, raw: undefined })
-	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', undefined).scope), { ok: true, raw: undefined })
-	assert.deepEqual(await waitForMarketUrl(fakeScope('unavailable').scope), { ok: true, raw: undefined })
+	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', { marketUrl: 'http://127.0.0.1:8765' }).scope), { ok: true, raw: 'http://127.0.0.1:8765', saveFailed: false })
+	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', {}).scope), { ok: true, raw: undefined, saveFailed: false })
+	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', undefined).scope), { ok: true, raw: undefined, saveFailed: false })
+	assert.deepEqual(await waitForMarketUrl(fakeScope('unavailable').scope), { ok: true, raw: undefined, saveFailed: false })
 	const f = fakeScope('loading')
 	const p = waitForMarketUrl(f.scope, { timeoutMs: 5000 })
 	assert.equal(f.listeners.size, 1)
 	f.set('loading')
 	f.set('ready', { marketUrl: 'http://127.0.0.1:9' })
-	assert.deepEqual(await p, { ok: true, raw: 'http://127.0.0.1:9' })
+	assert.deepEqual(await p, { ok: true, raw: 'http://127.0.0.1:9', saveFailed: false })
 	assert.equal(f.listeners.size, 0)
 })
 
@@ -389,39 +394,6 @@ test('waitForMarketUrl：一直 loading 超时；被作废立即结束；都取�
 	const pre = new AbortController()
 	pre.abort()
 	assert.deepEqual(await waitForMarketUrl(fakeScope('loading').scope, { signal: pre.signal }), { ok: false })
-})
-
-// ───────────────────────── 审查返工：待重启记录 ─────────────────────────
-
-test('settleRestartPending：失败恢复旧记录（旧值不存在才删除）；applied 清除；restart 保留新记录', () => {
-	const mk = () => {
-		const data = new Map<string, string>()
-		return { data, store: { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v), removeItem: (k: string) => void data.delete(k) } }
-	}
-	const failed = { kind: 'failed', failure: { code: 'cancelled' } } as const
-	// 已有待重启 0.2.7，再装 0.2.8 失败 → 仍为 0.2.7
-	let m = mk()
-	markRestartPending(m.store, '0.2.7')
-	const previous = m.store.getItem(RESTART_KEY)
-	markRestartPending(m.store, '0.2.8')
-	settleRestartPending(m.store, previous, failed)
-	assert.equal(m.data.get(RESTART_KEY), '0.2.7')
-	assert.equal(restartPending(m.store, '0.2.7'), true)
-	// 没有旧记录：失败后删除
-	m = mk()
-	markRestartPending(m.store, '0.2.8')
-	settleRestartPending(m.store, null, failed)
-	assert.equal(m.data.has(RESTART_KEY), false)
-	// applied 清除；restart 保留
-	m = mk()
-	markRestartPending(m.store, '0.2.8')
-	settleRestartPending(m.store, '0.2.7', { kind: 'applied' })
-	assert.equal(m.data.has(RESTART_KEY), false)
-	m = mk()
-	markRestartPending(m.store, '0.2.8')
-	settleRestartPending(m.store, '0.2.7', { kind: 'restart' })
-	assert.equal(m.data.get(RESTART_KEY), '0.2.8')
-	settleRestartPending(undefined, null, failed)
 })
 
 // ───────────────────────── 审查返工：失败原因统一上限 ─────────────────────────
@@ -454,4 +426,205 @@ test('失败原因：所有来源统一规范化并截断到 400 字（省略号
 	assert.equal((viaMessage as { failure: { text: string } }).failure.text.length, 400)
 	const net = await checkUpdate(() => Promise.reject(new TypeError('n'.repeat(900))), 'https://x.example', '0.2.6')
 	assert.equal(((net as { failure: { message: string } }).failure).message.length, 400)
+})
+
+// ───────────────────────── 第二轮返工：等保存、作废、站点变化 ─────────────────────────
+
+function fakeSave(initial = false) {
+	let state = { saving: initial, failed: false }
+	const listeners = new Set<() => void>()
+	const save: SaveWatch = {
+		getSnapshot: () => state,
+		subscribe: (l) => {
+			listeners.add(l)
+			return () => void listeners.delete(l)
+		}
+	}
+	return { save, listeners, set: (next: { saving: boolean; failed?: boolean }) => { state = { saving: next.saving, failed: next.failed ?? false }; for (const l of [...listeners]) l() } }
+}
+
+test('waitForMarketUrl：保存进行中先等，保存成功后按新接受的值；一直不落定超时；订阅都撤掉', async () => {
+	const f = fakeScope('ready', {})
+	const sv = fakeSave(true)
+	const p = waitForMarketUrl(f.scope, { timeoutMs: 5000, save: sv.save })
+	await new Promise((r) => setTimeout(r, 10))
+	assert.equal(f.listeners.size + sv.listeners.size, 2)
+	f.set('ready', { marketUrl: 'http://127.0.0.1:9' })
+	sv.set({ saving: false })
+	assert.deepEqual(await p, { ok: true, raw: 'http://127.0.0.1:9', saveFailed: false })
+	assert.equal(f.listeners.size + sv.listeners.size, 0)
+	const stuck = fakeSave(true)
+	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', {}).scope, { timeoutMs: 20, save: stuck.save }), { ok: false })
+	assert.equal(stuck.listeners.size, 0)
+})
+
+test('waitForMarketUrl：保存失败时按旧的已接受值继续，并带 saveFailed', async () => {
+	const f = fakeScope('ready', { marketUrl: 'http://127.0.0.1:7' })
+	const sv = fakeSave(true)
+	const p = waitForMarketUrl(f.scope, { save: sv.save })
+	sv.set({ saving: false, failed: true })
+	assert.deepEqual(await p, { ok: true, raw: 'http://127.0.0.1:7', saveFailed: true })
+})
+
+test('waitForMarketUrl / checkUpdate：已中止就不发请求（ready 后同一任务内立即 abort → fetch 0 次）', async () => {
+	const ctl = new AbortController()
+	const { impl, calls } = fakeFetch(index())
+	const waited = waitForMarketUrl(fakeScope('ready', { marketUrl: 'http://127.0.0.1:9' }).scope, { signal: ctl.signal })
+	ctl.abort()
+	await waited
+	const result = await checkUpdate(impl, 'http://127.0.0.1:9', '0.2.6', { signal: ctl.signal })
+	assert.deepEqual(result, { kind: 'failed', failure: { code: 'cancelled' } })
+	assert.equal(calls.length, 0)
+	const pre = new AbortController()
+	pre.abort()
+	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', {}).scope, { signal: pre.signal }), { ok: false }, '立即返回路径也要先看 aborted')
+})
+
+test('waitForMarketUrl：订阅时同步回调也不留订阅（拿到撤销函数后已结束就立刻撤）', async () => {
+	let status: 'loading' | 'ready' = 'loading'
+	let offCalls = 0
+	const scope: ConfigScope = {
+		getSnapshot: () => ({ status, value: { marketUrl: 'http://127.0.0.1:9' } }),
+		subscribe: (l) => {
+			status = 'ready'
+			l()
+			return () => void offCalls++
+		}
+	}
+	assert.deepEqual(await waitForMarketUrl(scope), { ok: true, raw: 'http://127.0.0.1:9', saveFailed: false })
+	assert.equal(offCalls, 1)
+	const sv = fakeSave(true)
+	let saveOff = 0
+	const save: SaveWatch = { getSnapshot: sv.save.getSnapshot, subscribe: (l) => { sv.set({ saving: false }); l(); return () => void saveOff++ } }
+	const f = fakeScope('ready', {})
+	assert.equal((await waitForMarketUrl(f.scope, { save })).ok, true)
+	assert.equal(saveOff, 1)
+	assert.equal(f.listeners.size, 0)
+})
+
+test('watchMarketUrl：已接受的值变了才通知；首次读到值与 loading 期间不算；没配与空串同为缺省', () => {
+	const f = fakeScope('loading')
+	let n = 0
+	const off = watchMarketUrl(f.scope, () => n++)
+	f.set('ready', { marketUrl: 'http://127.0.0.1:9' })
+	assert.equal(n, 0, 'loading → 首个值不算变化')
+	f.set('ready', { marketUrl: 'http://127.0.0.1:9/' })
+	assert.equal(n, 0, '归一化后相同')
+	f.set('loading')
+	f.set('ready', { marketUrl: 'http://127.0.0.1:9' })
+	assert.equal(n, 0)
+	f.set('ready', { marketUrl: 'http://127.0.0.1:10' })
+	assert.equal(n, 1)
+	f.set('ready', {})
+	assert.equal(n, 2, '清除后回到缺省也是变化')
+	f.set('ready', { marketUrl: '' })
+	assert.equal(n, 2, '空串与没配同为缺省')
+	f.set('ready', { marketUrl: 'ftp://x' })
+	assert.equal(n, 3)
+	off()
+	assert.equal(f.listeners.size, 0)
+	f.set('ready', {})
+	assert.equal(n, 3)
+})
+
+test('sameSite：当前已接受的站点是不是结果当时读的 origin', () => {
+	assert.equal(sameSite('http://127.0.0.1:9/', 'http://127.0.0.1:9'), true)
+	assert.equal(sameSite('http://127.0.0.1:10', 'http://127.0.0.1:9'), false)
+	assert.equal(sameSite(undefined, DEFAULT_MARKET_URL), true)
+	assert.equal(sameSite('', DEFAULT_MARKET_URL), true)
+	assert.equal(sameSite(undefined, 'http://127.0.0.1:9'), false)
+	assert.equal(sameSite('ftp://x', DEFAULT_MARKET_URL), false)
+})
+
+// ───────────────────────── 第二轮返工：拒绝路径与安装状态机 ─────────────────────────
+
+test('installUpdate：installBundle / waitForInstall reject 也归一化：先按 requestId 找回，仍失败才转 failed', async () => {
+	const boom = () => Promise.reject(new Error('socket exploded'))
+	const recovers: PluginManagerRemote = { installBundle: boom, waitForInstall: () => Promise.resolve({ ok: true, value: { application: 'restart-required' } }) }
+	assert.deepEqual(await installUpdate(recovers, 'u', true, 'r'), { kind: 'restart' })
+	const nothing: PluginManagerRemote = { installBundle: boom, waitForInstall: () => Promise.resolve({ ok: true, value: null }) }
+	assert.deepEqual(await installUpdate(nothing, 'u', true, 'r'), { kind: 'failed', failure: { code: 'install', text: 'socket exploded' } })
+	const bothReject: PluginManagerRemote = { installBundle: boom, waitForInstall: boom }
+	assert.deepEqual(await installUpdate(bothReject, 'u', true, 'r'), { kind: 'failed', failure: { code: 'install', text: 'socket exploded' } })
+})
+
+function store() {
+	const data = new Map<string, string>()
+	return { data, store: { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v), removeItem: (k: string) => void data.delete(k) } }
+}
+function deferredManager() {
+	let resolveInstall!: (r: RemoteResult<InstallResult>) => void
+	let rejectInstall!: (e: unknown) => void
+	const calls: Array<{ spec: string; options: object }> = []
+	const remote: PluginManagerRemote = {
+		installBundle: (spec, options) => {
+			calls.push({ spec, options })
+			return new Promise((resolve, reject) => { resolveInstall = resolve; rejectInstall = reject })
+		},
+		waitForInstall: () => Promise.resolve({ ok: true, value: null })
+	}
+	return { remote, calls, resolve: (a: InstallResult['application']) => resolveInstall({ ok: true, value: { application: a } }), reject: (e: unknown) => rejectInstall(e) }
+}
+
+test('runInstall：进行中的安装唯一——再次调用不再调 installBundle，拿同一个结果；进行中记录收尾时删除', async () => {
+	const m = deferredManager()
+	const s = store()
+	const registry: InstallRegistry = {}
+	const first = runInstall(registry, s.store, m.remote, 'u1', '0.2.8', true)
+	assert.equal(s.data.get(INFLIGHT_KEY), '0.2.8', '安装前就记下目标版本')
+	assert.equal(registry.current?.version, '0.2.8')
+	const second = runInstall(registry, s.store, m.remote, 'u2', '0.2.9', false)
+	assert.equal(second, first, '同一个 Promise')
+	assert.equal(m.calls.length, 1)
+	m.resolve('restart-required')
+	assert.deepEqual(await first, { kind: 'restart' })
+	assert.deepEqual(await second, { kind: 'restart' })
+	assert.equal(m.calls.length, 1)
+	assert.equal(registry.current, undefined)
+	assert.equal(s.data.has(INFLIGHT_KEY), false)
+	assert.equal(s.data.get(RESTART_KEY), '0.2.8', 'restart 才升为已确认')
+})
+
+test('runInstall：已确认 0.2.7，再装 0.2.8 失败 / 取消 / 拒绝 → 仍是 0.2.7；applied 清除；restart 更新为新版本', async () => {
+	const s = store()
+	markRestartPending(s.store, '0.2.7')
+	for (const how of ['failed', 'cancelled', 'reject'] as const) {
+		const m = deferredManager()
+		const registry: InstallRegistry = {}
+		const p = runInstall(registry, s.store, m.remote, 'u', '0.2.8', true)
+		assert.equal(restartPending(s.store, '0.2.7'), true, '安装中已确认的 0.2.7 仍有效')
+		if (how === 'reject') m.reject(new Error('boom'))
+		else m.resolve(how)
+		const outcome = await p
+		assert.equal(outcome.kind, 'failed', how)
+		assert.equal(s.data.get(RESTART_KEY), '0.2.7', how)
+		assert.equal(restartPending(s.store, '0.2.7'), true, how)
+		assert.equal(restartPending(s.store, '0.2.8'), false, how)
+		assert.equal(s.data.has(INFLIGHT_KEY), false, how)
+		assert.equal(registry.current, undefined, how)
+	}
+	let m = deferredManager()
+	const applied = runInstall({}, s.store, m.remote, 'u', '0.2.8', true)
+	m.resolve('applied')
+	assert.deepEqual(await applied, { kind: 'applied' })
+	assert.equal(s.data.has(RESTART_KEY), false)
+	markRestartPending(s.store, '0.2.7')
+	m = deferredManager()
+	const restart = runInstall({}, s.store, m.remote, 'u', '0.2.8', true)
+	m.resolve('restart-required')
+	assert.deepEqual(await restart, { kind: 'restart' })
+	assert.equal(s.data.get(RESTART_KEY), '0.2.8')
+})
+
+test('restartPending：热替换场景——安装进行中（记录目标版本），盘上版本已是目标版本 → 视为待重启', async () => {
+	const m = deferredManager()
+	const s = store()
+	const registry: InstallRegistry = {}
+	const p = runInstall(registry, s.store, m.remote, 'u', '0.2.8', true)
+	assert.equal(restartPending(s.store, '0.2.7'), false)
+	assert.equal(restartPending(s.store, '0.2.8'), true, '新页面看到进行中的目标版本 == 盘上版本')
+	assert.equal(restartPending(s.store, undefined), false)
+	m.resolve('restart-required')
+	await p
+	assert.equal(restartPending(s.store, '0.2.8'), true)
 })

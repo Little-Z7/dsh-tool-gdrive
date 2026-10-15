@@ -14,7 +14,12 @@ export interface UpdateActionProps {
 	subject: PluginsSubject
 	t: Translate
 	checkUpdate: (installed: string | undefined, signal?: AbortSignal) => Promise<UpdateCheck>
-	installUpdate: (url: string, version: string, enabled: boolean) => Promise<InstallOutcome>
+	/** `origin`：检查结果读的站点；点击时已接受的站点若不同，不安装（回 stale），由本组件重新检查。 */
+	installUpdate: (url: string, version: string, enabled: boolean, origin: string) => Promise<InstallOutcome>
+	/** 已有安装在进行（比如热替换后重挂载）：拿到它的目标版本与结果，不再发起新安装。 */
+	inflight?: () => { version: string; promise: Promise<InstallOutcome> } | undefined
+	/** 已接受的市场地址变了就通知；返回撤销函数。 */
+	watchSite?: (listener: () => void) => () => void
 	/** 盘上这个版本是不是本窗口刚装、还没重启 DSH。 */
 	restartPending: (installed: string | undefined) => boolean
 }
@@ -66,13 +71,14 @@ function reasonText(t: Translate, failure: Failure): string {
 	return t(key, params)
 }
 
-export function UpdateAction({ subject, t, checkUpdate, installUpdate, restartPending: isRestartPending }: UpdateActionProps) {
+export function UpdateAction({ subject, t, checkUpdate, installUpdate, inflight, watchSite, restartPending: isRestartPending }: UpdateActionProps) {
 	const own = subject.kind === 'bundle' && subject.pkg.name === PLUGIN_NAME && subject.pkg.installed
 	const installed = subject.kind === 'bundle' ? subject.pkg.version : undefined
 	const enabled = subject.kind === 'bundle' ? subject.pkg.enabled !== false : true
 	const [phase, setPhase] = useState<Phase>({ kind: 'checking' })
 	const live = useRef(true)
 	const running = useRef<AbortController | null>(null)
+	const installing = useRef(false)
 	useEffect(() => {
 		live.current = true
 		return () => {
@@ -93,22 +99,40 @@ export function UpdateAction({ subject, t, checkUpdate, installUpdate, restartPe
 				if (live.current && running.current === ctl) setPhase({ kind: 'checked', check: result })
 			})
 	}
+
+	/* 一次安装的收尾：站点已变（stale）就重新检查，其余显示结果。 */
+	const settle = (version: string, outcome: InstallOutcome): void => {
+		installing.current = false
+		if (!live.current) return
+		if (outcome.kind === 'stale') check()
+		else setPhase({ kind: 'installed', version, outcome })
+	}
+	const follow = (version: string, promise: Promise<InstallOutcome>): void => {
+		installing.current = true
+		setPhase({ kind: 'installing', version })
+		void promise.catch((e: unknown): InstallOutcome => ({ kind: 'failed', failure: unexpected(e) })).then((outcome) => settle(version, outcome))
+	}
 	useEffect(() => {
-		/* 换了版本（页面按新的 subject 重画）就再查一次。 */
-		if (own) check()
+		/* 打开页面 / 换了版本（页面按新的 subject 重画）：有安装在进行就接着等它，否则查一次。 */
+		if (!own) return
+		const ongoing = inflight?.()
+		if (ongoing) follow(ongoing.version, ongoing.promise)
+		else check()
+	}, [own, installed])
+	useEffect(() => {
+		/* 已接受的市场地址变了：作废当前结果、重新检查（安装进行中不打断）。 */
+		if (!own || !watchSite) return
+		return watchSite(() => {
+			if (!installing.current) check()
+		})
 	}, [own, installed])
 
 	if (!own) return null
 	/* 装完新版插件页会按新包重画、这颗按钮重新挂载，「重启后生效」不能只记在本地状态里。 */
 	const restartPending = isRestartPending(installed)
 
-	const install = (url: string, version: string): void => {
-		setPhase({ kind: 'installing', version })
-		void installUpdate(url, version, enabled)
-			.catch((e: unknown): InstallOutcome => ({ kind: 'failed', failure: unexpected(e) }))
-			.then((outcome) => {
-				if (live.current) setPhase({ kind: 'installed', version, outcome })
-			})
+	const install = (url: string, version: string, origin: string): void => {
+		follow(version, installUpdate(url, version, enabled, origin))
 	}
 
 	let button: { label: string; onClick?: () => void; busy?: boolean; primary?: boolean }
@@ -132,7 +156,7 @@ export function UpdateAction({ subject, t, checkUpdate, installUpdate, restartPe
 		case 'checked': {
 			const result = phase.check
 			if (result.kind === 'available') {
-				button = { label: t('updateInstall', { version: result.version }), onClick: () => install(result.url, result.version), primary: true }
+				button = { label: t('updateInstall', { version: result.version }), onClick: () => install(result.url, result.version, result.origin), primary: true }
 			} else if (result.kind === 'failed') {
 				button = { label: t('updateRetry'), onClick: check }
 				status = { text: t('updateCheckFailed', { reason: reasonText(t, result.failure) }), tone: 'error' }
@@ -146,8 +170,16 @@ export function UpdateAction({ subject, t, checkUpdate, installUpdate, restartPe
 		}
 	}
 
+	/* 上一次保存配置没成功：这次读的是旧的已接受地址，不能静默显示成正常。 */
+	const note = phase.kind === 'checked' && phase.check.saveFailed ? t('updateSaveFailedNote') : null
+
 	return (
 		<span style={WRAP}>
+			{note !== null ? (
+				<span style={statusStyle('muted')} role="status">
+					{note}
+				</span>
+			) : null}
 			{status !== null ? (
 				<span style={statusStyle(status.tone)} role={status.tone === 'error' ? 'alert' : 'status'}>
 					{status.text}
