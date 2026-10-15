@@ -7,8 +7,10 @@ import {
 	ARCHIVE_PATH,
 	DEFAULT_MARKET_URL,
 	INDEX_PATH,
+	REASON_MAX,
 	RESTART_KEY,
 	checkUpdate,
+	clampReason,
 	clearRestartPending,
 	compareVersions,
 	installUpdate,
@@ -18,7 +20,10 @@ import {
 	parseMarketIndex,
 	reasonMessage,
 	restartPending,
+	settleRestartPending,
 	updateSpec,
+	waitForMarketUrl,
+	type ConfigScope,
 	type Failure,
 	type FetchInit,
 	type FetchLike
@@ -284,7 +289,9 @@ const FAILURES: Failure[] = [
 	{ code: 'bad-entry', detail: 'latest' },
 	{ code: 'bad-file', file: 'f', version: '0.2.7' },
 	{ code: 'cancelled' },
-	{ code: 'install', text: 'ERR_PNPM_X' }
+	{ code: 'install', text: 'ERR_PNPM_X' },
+	{ code: 'config-loading' },
+	{ code: 'unexpected', message: 'boom' }
 ]
 
 const placeholders = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]!).sort()
@@ -309,4 +316,142 @@ test('缺省地址一致：src/index.ts 的 description 与 README 写的缺省�
 	assert.ok(readFileSync(new URL('src/index.ts', root), 'utf8').includes(DEFAULT_MARKET_URL))
 	assert.ok(readFileSync(new URL('README.md', root), 'utf8').includes(DEFAULT_MARKET_URL))
 	for (const dict of [en, zh]) assert.ok(dict.marketUrlHint.includes(DEFAULT_MARKET_URL))
+})
+
+// ───────────────────────── 审查返工：解析不抛出 ─────────────────────────
+
+test('checkUpdate：畸形清单返回失败结果而不是抛出（schemaVersion / latest 为对象、数组、null 等）', async () => {
+	const run = (body: unknown) => checkUpdate(fakeFetch(body).impl, undefined, '0.2.6')
+	const failure = async (body: unknown): Promise<Failure> => {
+		const r = await run(body)
+		assert.equal(r.kind, 'failed')
+		return (r as { failure: Failure }).failure
+	}
+	/* 真实 JSON.parse 出来的值：toString 为 null 的对象，String() 它会抛 TypeError */
+	const evil = JSON.parse('{"schemaVersion":{"toString":null},"plugins":[]}')
+	assert.deepEqual(await failure(evil), { code: 'schema', schema: 'object' })
+	assert.deepEqual(await failure({ schemaVersion: [1], plugins: [] }), { code: 'schema', schema: 'array' })
+	assert.deepEqual(await failure({ schemaVersion: null, plugins: [] }), { code: 'schema', schema: 'null' })
+	assert.deepEqual(await failure({ schemaVersion: 2, plugins: [] }), { code: 'schema', schema: '2' })
+	assert.deepEqual(await failure({ schemaVersion: 'x'.repeat(100), plugins: [] }), { code: 'schema', schema: 'x'.repeat(40) })
+	assert.equal((await failure({ schemaVersion: true })).code, 'schema')
+	assert.deepEqual(await failure(index({ latest: JSON.parse('{"toString":null}') })), { code: 'bad-entry', detail: 'latest' })
+	assert.deepEqual(await failure(index({ latest: ['0.2.7'] })), { code: 'bad-entry', detail: 'latest' })
+	assert.deepEqual(await failure(index({}, { file: JSON.parse('{"toString":null}') })), { code: 'bad-entry', detail: 'file' })
+	assert.deepEqual(await failure(index({}, { tarSha256: JSON.parse('{"toString":null}') })), { code: 'bad-entry', detail: 'tarSha256' })
+	assert.deepEqual(await failure(index({ versions: 'x' })), { code: 'bad-entry', detail: 'versions' })
+	/* 其余意外（访问响应字段就抛）也落进失败分支，不向外抛 */
+	const hostile: FetchLike = () => Promise.resolve({ get ok(): boolean { throw new TypeError('boom') }, status: 200, json: () => Promise.resolve({}) })
+	assert.deepEqual(await checkUpdate(hostile, undefined, '0.2.6'), { kind: 'failed', failure: { code: 'unexpected', message: 'boom' } })
+	const hostileError: FetchLike = () => Promise.reject(JSON.parse('{"toString":null}'))
+	assert.deepEqual((await checkUpdate(hostileError, 'https://x.example', '0.2.6') as { failure: Failure }).failure.code, 'network')
+})
+
+// ───────────────────────── 审查返工：配置加载中不拿缺省市场顶替 ─────────────────────────
+
+function fakeScope(initial: 'loading' | 'ready' | 'unavailable', value?: { marketUrl?: unknown }) {
+	let snap = { status: initial, value }
+	const listeners = new Set<() => void>()
+	const scope: ConfigScope = {
+		getSnapshot: () => snap,
+		subscribe: (l) => {
+			listeners.add(l)
+			return () => void listeners.delete(l)
+		}
+	}
+	return { scope, listeners, set: (status: 'loading' | 'ready' | 'unavailable', v?: { marketUrl?: unknown }) => { snap = { status, value: v }; for (const l of [...listeners]) l() } }
+}
+
+test('waitForMarketUrl：就绪直接给值；loading → ready 取到自定义值；unavailable 才用缺省；订阅总会取消', async () => {
+	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', { marketUrl: 'http://127.0.0.1:8765' }).scope), { ok: true, raw: 'http://127.0.0.1:8765' })
+	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', {}).scope), { ok: true, raw: undefined })
+	assert.deepEqual(await waitForMarketUrl(fakeScope('ready', undefined).scope), { ok: true, raw: undefined })
+	assert.deepEqual(await waitForMarketUrl(fakeScope('unavailable').scope), { ok: true, raw: undefined })
+	const f = fakeScope('loading')
+	const p = waitForMarketUrl(f.scope, { timeoutMs: 5000 })
+	assert.equal(f.listeners.size, 1)
+	f.set('loading')
+	f.set('ready', { marketUrl: 'http://127.0.0.1:9' })
+	assert.deepEqual(await p, { ok: true, raw: 'http://127.0.0.1:9' })
+	assert.equal(f.listeners.size, 0)
+})
+
+test('waitForMarketUrl：一直 loading 超时；被作废立即结束；都取消订阅', async () => {
+	const f = fakeScope('loading')
+	assert.deepEqual(await waitForMarketUrl(f.scope, { timeoutMs: 20 }), { ok: false })
+	assert.equal(f.listeners.size, 0)
+	const g = fakeScope('loading')
+	const ctl = new AbortController()
+	const p = waitForMarketUrl(g.scope, { timeoutMs: 5000, signal: ctl.signal })
+	ctl.abort()
+	assert.deepEqual(await p, { ok: false })
+	assert.equal(g.listeners.size, 0)
+	const pre = new AbortController()
+	pre.abort()
+	assert.deepEqual(await waitForMarketUrl(fakeScope('loading').scope, { signal: pre.signal }), { ok: false })
+})
+
+// ───────────────────────── 审查返工：待重启记录 ─────────────────────────
+
+test('settleRestartPending：失败恢复旧记录（旧值不存在才删除）；applied 清除；restart 保留新记录', () => {
+	const mk = () => {
+		const data = new Map<string, string>()
+		return { data, store: { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v), removeItem: (k: string) => void data.delete(k) } }
+	}
+	const failed = { kind: 'failed', failure: { code: 'cancelled' } } as const
+	// 已有待重启 0.2.7，再装 0.2.8 失败 → 仍为 0.2.7
+	let m = mk()
+	markRestartPending(m.store, '0.2.7')
+	const previous = m.store.getItem(RESTART_KEY)
+	markRestartPending(m.store, '0.2.8')
+	settleRestartPending(m.store, previous, failed)
+	assert.equal(m.data.get(RESTART_KEY), '0.2.7')
+	assert.equal(restartPending(m.store, '0.2.7'), true)
+	// 没有旧记录：失败后删除
+	m = mk()
+	markRestartPending(m.store, '0.2.8')
+	settleRestartPending(m.store, null, failed)
+	assert.equal(m.data.has(RESTART_KEY), false)
+	// applied 清除；restart 保留
+	m = mk()
+	markRestartPending(m.store, '0.2.8')
+	settleRestartPending(m.store, '0.2.7', { kind: 'applied' })
+	assert.equal(m.data.has(RESTART_KEY), false)
+	m = mk()
+	markRestartPending(m.store, '0.2.8')
+	settleRestartPending(m.store, '0.2.7', { kind: 'restart' })
+	assert.equal(m.data.get(RESTART_KEY), '0.2.8')
+	settleRestartPending(undefined, null, failed)
+})
+
+// ───────────────────────── 审查返工：失败原因统一上限 ─────────────────────────
+
+test('失败原因：所有来源统一规范化并截断到 400 字（省略号计入），恰好 400 / 401 的边界', async () => {
+	assert.equal(REASON_MAX, 400)
+	assert.equal(clampReason('a'.repeat(400)), 'a'.repeat(400))
+	const cut = clampReason('a'.repeat(401))
+	assert.equal(cut.length, 400)
+	assert.ok(cut.endsWith('…'))
+	assert.equal(cut, 'a'.repeat(399) + '…')
+	assert.equal(clampReason('  a\n   b  '), 'a b')
+	const text = async (value: InstallResult) => {
+		const r = await installUpdate(manager({ ok: true, value }).remote, 'u', true, 'r')
+		return (r as { failure: { text: string } }).failure.text
+	}
+	const longLine = 'ERR_PNPM_X ' + 'z'.repeat(600)
+	const a = await text({ application: 'failed', packageResult: { output: longLine } })
+	assert.equal(a.length, 400)
+	assert.ok(a.startsWith('ERR_PNPM_X zzz') && a.endsWith('…'))
+	const b = await text({ application: 'failed', error: { code: 'c', diagnostic: 'd'.repeat(900) } })
+	assert.equal(b.length, 400)
+	const exact = await text({ application: 'failed', error: { code: 'c', diagnostic: 'd'.repeat(400) } })
+	assert.equal(exact, 'd'.repeat(400))
+	const over = await text({ application: 'failed', error: { code: 'c', diagnostic: 'd'.repeat(401) } })
+	assert.equal(over.length, 400)
+	const block = await text({ application: 'failed', packageResult: { output: 'Error: x\n' + 'y'.repeat(700) } })
+	assert.equal(block.length, 400)
+	const viaMessage = await installUpdate(manager({ ok: false, error: { code: 'c', message: 'm'.repeat(900) } }).remote, 'u', true, 'r')
+	assert.equal((viaMessage as { failure: { text: string } }).failure.text.length, 400)
+	const net = await checkUpdate(() => Promise.reject(new TypeError('n'.repeat(900))), 'https://x.example', '0.2.6')
+	assert.equal(((net as { failure: { message: string } }).failure).message.length, 400)
 })

@@ -8,13 +8,17 @@ import { NS, en, zh } from './locales.js'
 import { GdriveFormController, GdrivePage } from './page.js'
 import { UpdateAction } from './UpdateAction.js'
 import {
+	RESTART_KEY,
 	WINDOW_STORE_NAME,
 	checkUpdate,
-	clearRestartPending,
 	installUpdate,
 	markRestartPending,
+	newRequestId,
 	restartPending,
-	type KeyValueStore
+	settleRestartPending,
+	waitForMarketUrl,
+	type KeyValueStore,
+	type UpdateCheck
 } from './update.js'
 
 const WINDOW_STORE = Symbol.for(WINDOW_STORE_NAME)
@@ -65,6 +69,8 @@ function apply(ctx: ClientContext) {
 	/* 详情页的「检查更新」：等插件管理的远程服务到位再登记；服务撤掉时一起撤。 */
 	ctx.inject(['remote.pluginManager'], (scope) => {
 		const manager = scope.remote.pluginManager
+		/* 最近一次安装的请求编号：较早的请求晚收尾时，不许覆盖之后请求写下的待重启记录。 */
+		let latestRequest = ''
 		scope.slots.inject('plugins.detail.actions', () =>
 			scope.slots.register(
 				{
@@ -73,14 +79,22 @@ function apply(ctx: ClientContext) {
 					order: 10,
 					locale: NS,
 					inject: () => ({
-						/* 调用时才现读配置：用户在配置页改了市场地址，下一次检查就生效。 */
-						checkUpdate: (installed: string | undefined) =>
-							checkUpdate((url, init) => globalThis.fetch(url, init), form.getSnapshot().value?.marketUrl, installed),
+						/* 调用时才现读配置：用户在配置页改了市场地址，下一次检查就生效；配置还在加载时先等，不拿缺省市场顶替。 */
+						checkUpdate: async (installed: string | undefined, signal?: AbortSignal): Promise<UpdateCheck> => {
+							const site = await waitForMarketUrl(form, { signal })
+							if (!site.ok) return { kind: 'failed', failure: { code: 'config-loading' } }
+							return checkUpdate((url, init) => globalThis.fetch(url, init), site.raw, installed, { signal })
+						},
 						installUpdate: async (url: string, version: string, enabled: boolean) => {
-							/* 必须在装之前记：装成功的那一刻 DSH 就热替换本半侧，`await` 之后的代码未必还有机会跑。 */
-							markRestartPending(pageStore(), version)
-							const outcome = await installUpdate(manager, url, enabled)
-							if (outcome.kind !== 'restart') clearRestartPending(pageStore())
+							/* 必须在装之前记：装成功的那一刻 DSH 就热替换本半侧，`await` 之后的代码未必还有机会跑。
+							 * 先记下旧记录：这次没装成时恢复它，不能删掉一条仍然有效的「待重启」。 */
+							const store = pageStore()
+							const previous = store.getItem(RESTART_KEY)
+							const requestId = newRequestId()
+							latestRequest = requestId
+							markRestartPending(store, version)
+							const outcome = await installUpdate(manager, url, enabled, requestId)
+							if (latestRequest === requestId) settleRestartPending(store, previous, outcome)
 							return outcome
 						},
 						restartPending: (installed: string | undefined) => restartPending(pageStore(), installed)

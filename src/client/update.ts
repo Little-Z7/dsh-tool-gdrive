@@ -39,6 +39,25 @@ export type Failure =
 	| { code: 'bad-file'; file: string; version: string }
 	| { code: 'cancelled' }
 	| { code: 'install'; text: string }
+	| { code: 'config-loading' }
+	| { code: 'unexpected'; message: string }
+
+/** 展示给用户的失败原因统一上限（省略号计入）。 */
+export const REASON_MAX = 400
+
+/** 规范化（换行接成一行、去首尾空白）后截断到 REASON_MAX 个字符，省略号计入。 */
+export function clampReason(text: string): string {
+	const one = text.replace(/\s*\n\s*/g, ' ').trim()
+	return one.length > REASON_MAX ? `${one.slice(0, REASON_MAX - 1)}…` : one
+}
+
+/** 外部值的展示描述：只对 number / string 取值，其他写类型名，不对任意对象调用 String / 插值。 */
+function describeValue(v: unknown): string {
+	if (typeof v === 'number' || typeof v === 'string') return clampReason(String(v)).slice(0, 40)
+	if (v === null) return 'null'
+	if (Array.isArray(v)) return 'array'
+	return typeof v
+}
 
 // ───────────────────────── 市场地址 ─────────────────────────
 
@@ -123,7 +142,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 export function parseMarketIndex(raw: unknown): Parsed {
 	const entryBad = (detail: string): Parsed => ({ ok: false, failure: { code: 'bad-entry', detail } })
 	if (!isRecord(raw)) return { ok: false, failure: { code: 'not-json' } }
-	if (raw.schemaVersion !== 1) return { ok: false, failure: { code: 'schema', schema: String(raw.schemaVersion) } }
+	if (raw.schemaVersion !== 1) return { ok: false, failure: { code: 'schema', schema: describeValue(raw.schemaVersion) } }
 	if (!Array.isArray(raw.plugins)) return entryBad('plugins')
 	const mine = raw.plugins.filter((p) => isRecord(p) && p.name === PLUGIN_NAME)
 	if (mine.length === 0) return { ok: false, failure: { code: 'missing' } }
@@ -160,7 +179,13 @@ export type FetchInit = {
 }
 export type FetchLike = (url: string, init: FetchInit) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>
 
-const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e))
+const errorMessage = (e: unknown): string => {
+	try {
+		return clampReason(e instanceof Error ? e.message : String(e))
+	} catch {
+		return 'unknown error'
+	}
+}
 
 /**
  * 读市场清单，对比已装版本。地址不合格时不发请求。
@@ -171,6 +196,20 @@ export async function checkUpdate(
 	rawSite: unknown,
 	installed: string | undefined,
 	options: { timeoutMs?: number; signal?: AbortSignal } = {}
+): Promise<UpdateCheck> {
+	/* 只返回结果、不抛出：解析阶段遇到任何意外也落进失败分支。 */
+	try {
+		return await runCheck(fetchImpl, rawSite, installed, options)
+	} catch (e) {
+		return { kind: 'failed', failure: { code: 'unexpected', message: errorMessage(e) } }
+	}
+}
+
+async function runCheck(
+	fetchImpl: FetchLike,
+	rawSite: unknown,
+	installed: string | undefined,
+	options: { timeoutMs?: number; signal?: AbortSignal }
 ): Promise<UpdateCheck> {
 	const site = marketSite(rawSite)
 	if (!site.ok) return { kind: 'failed', failure: { code: 'bad-site', value: site.value } }
@@ -226,6 +265,56 @@ export async function checkUpdate(
 	}
 }
 
+// ───────────────────────── 读配置 ─────────────────────────
+
+export const CONFIG_WAIT_MS = 10000
+
+/** 配置节的最小形状（SettingsFormScope 的子集）。 */
+export interface ConfigScope {
+	getSnapshot(): { status: 'loading' | 'ready' | 'unavailable'; value: { marketUrl?: unknown } | undefined }
+	subscribe(listener: () => void): () => void
+}
+
+/**
+ * 取市场地址的配置值。快照还在 loading 时等它离开 loading（subscribe，`timeoutMs` 上限，`signal` 可作废），
+ * 不能把「还没读到」当成「没配」去请求缺省市场。就绪后按当时的值；宿主不提供这节配置（unavailable）才用缺省。
+ * 超时或被作废返回 `{ ok: false }`，调用方不发请求。
+ */
+export function waitForMarketUrl(
+	scope: ConfigScope,
+	options: { timeoutMs?: number; signal?: AbortSignal } = {}
+): Promise<{ ok: true; raw: unknown } | { ok: false }> {
+	const read = (): { ok: true; raw: unknown } | undefined => {
+		const snap = scope.getSnapshot()
+		return snap.status === 'loading' ? undefined : { ok: true, raw: snap.status === 'ready' ? snap.value?.marketUrl : undefined }
+	}
+	const now = read()
+	if (now) return Promise.resolve(now)
+	return new Promise((resolve) => {
+		let done = false
+		let off: (() => void) | undefined
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const finish = (result: { ok: true; raw: unknown } | { ok: false }) => {
+			if (done) return
+			done = true
+			if (timer !== undefined) clearTimeout(timer)
+			options.signal?.removeEventListener('abort', onAbort)
+			off?.()
+			resolve(result)
+		}
+		const onAbort = () => finish({ ok: false })
+		if (options.signal?.aborted) return finish({ ok: false })
+		options.signal?.addEventListener('abort', onAbort, { once: true })
+		timer = setTimeout(() => finish({ ok: false }), options.timeoutMs ?? CONFIG_WAIT_MS)
+		off = scope.subscribe(() => {
+			const r = read()
+			if (r) finish(r)
+		})
+		const again = read()
+		if (again) finish(again)
+	})
+}
+
 // ───────────────────────── 安装 ─────────────────────────
 
 export type InstallOutcome = { kind: 'restart' } | { kind: 'applied' } | { kind: 'failed'; failure: Failure }
@@ -255,7 +344,7 @@ export async function installUpdate(
 	if (!answer.ok) {
 		const recovered = await manager.waitForInstall(requestId)
 		if (recovered.ok && recovered.value) answer = { ok: true, value: recovered.value }
-		else return { kind: 'failed', failure: { code: 'install', text: answer.error.message || answer.error.code } }
+		else return { kind: 'failed', failure: { code: 'install', text: clampReason(answer.error.message || answer.error.code) } }
 	}
 	const result = answer.value
 	if (result.application === 'restart-required') return { kind: 'restart' }
@@ -263,8 +352,6 @@ export async function installUpdate(
 	if (result.application === 'cancelled') return { kind: 'failed', failure: { code: 'cancelled' } }
 	return { kind: 'failed', failure: { code: 'install', text: failureText(result) } }
 }
-
-const REASON_MAX = 400
 
 /** pnpm 12 起不再打 ERR_PNPM_ 代码，原因在 `Error:` 开头的那一段（按 80 列折行，URL 会被折断，接回去）。 */
 function errorBlock(text: string | undefined): string | undefined {
@@ -278,16 +365,18 @@ function errorBlock(text: string | undefined): string | undefined {
 		if (t === '') continue
 		out += out === '' || out.endsWith('-') ? t : ` ${t}`
 	}
-	return out.length > REASON_MAX ? `${out.slice(0, REASON_MAX)}…` : out
+	return out
 }
 
+/** 先选出最终原因，再统一规范化并截断到 REASON_MAX（所有来源同一条出口）。 */
 export function failureText(result: InstallResult): string {
 	const output = result.packageResult?.output?.trim()
 	/* pnpm 的输出很长，真正的原因在 ERR_PNPM_ 那一行；前面重试时的 `[WARN] … error (ERR_PNPM_…)` 只是过程。 */
 	const lines = output?.split('\n').filter((line) => line.includes('ERR_PNPM_')) ?? []
 	const pnpmLine = lines.find((line) => !line.trimStart().startsWith('[WARN]')) ?? lines[0]
 	const diagnostic = result.error?.diagnostic
-	return pnpmLine?.trim() || errorBlock(output) || errorBlock(diagnostic) || diagnostic || result.error?.code || result.application
+	const chosen = pnpmLine?.trim() || errorBlock(output) || errorBlock(diagnostic) || diagnostic || result.error?.code || result.application
+	return clampReason(chosen)
 }
 
 /** 失败代码 → 文案键与参数（界面用 t(key, params) 翻译）。 */
@@ -315,6 +404,10 @@ export function reasonMessage(failure: Failure): { key: string; params: Record<s
 			return { key: 'updateReasonCancelled', params: {} }
 		case 'install':
 			return { key: 'updateReasonInstall', params: { text: failure.text } }
+		case 'config-loading':
+			return { key: 'updateReasonConfigLoading', params: {} }
+		case 'unexpected':
+			return { key: 'updateReasonUnexpected', params: { message: failure.message } }
 	}
 }
 
@@ -354,4 +447,18 @@ export function restartPending(store: KeyValueStore | undefined, installed: stri
 	} catch {
 		return false
 	}
+}
+
+/**
+ * 一次安装收尾后的待重启记录：装之前先记下旧记录值再写入新版本，
+ * 结果为 restart 保留新记录；applied 清除；failed / cancelled 恢复旧值（旧值不存在才删除），
+ * 不能把更早一次仍有效的「待重启」记录一并删掉。
+ */
+export function settleRestartPending(store: KeyValueStore | undefined, previous: string | null, outcome: InstallOutcome): void {
+	if (outcome.kind === 'restart') return
+	if (outcome.kind === 'applied' || previous === null) {
+		clearRestartPending(store)
+		return
+	}
+	markRestartPending(store, previous)
 }

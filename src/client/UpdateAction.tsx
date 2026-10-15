@@ -8,12 +8,12 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Button, TextShimmer } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PluginsSubject, Translate } from './contract.js'
-import { PLUGIN_NAME, reasonMessage, type Failure, type InstallOutcome, type UpdateCheck } from './update.js'
+import { PLUGIN_NAME, clampReason, reasonMessage, type Failure, type InstallOutcome, type UpdateCheck } from './update.js'
 
 export interface UpdateActionProps {
 	subject: PluginsSubject
 	t: Translate
-	checkUpdate: (installed: string | undefined) => Promise<UpdateCheck>
+	checkUpdate: (installed: string | undefined, signal?: AbortSignal) => Promise<UpdateCheck>
 	installUpdate: (url: string, version: string, enabled: boolean) => Promise<InstallOutcome>
 	/** 盘上这个版本是不是本窗口刚装、还没重启 DSH。 */
 	restartPending: (installed: string | undefined) => boolean
@@ -28,16 +28,38 @@ type Phase =
 type Tone = 'muted' | 'ok' | 'error'
 
 const WRAP: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }
-/* 对比度（浅色底实测）：label-tertiary 3.7:1、state-error-primary 4.498:1，都不到 4.5:1，
- * 所以「已是最新」用 label-secondary，错误色向正文色掺 20% 压深一点（token 间的 color-mix，随明暗主题走）。 */
-const STATUS: Record<Tone, CSSProperties> = {
-	muted: { color: 'var(--dsw-alias-label-secondary)' },
-	ok: { color: 'var(--dsw-alias-label-secondary)' },
-	error: { color: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 80%, var(--dsw-alias-label-primary))' }
-}
 /* DSH 的页头操作区不收缩（flex-shrink: 0），状态文字太宽会把「卸载」和启停开关挤出窗口；
  * 窗口窄（侧栏收起，宽度 < 1100px）时跟着窗口收窄：实测 480px 起不溢出，760px 起为满宽 360px。 */
 const STATUS_BASE: CSSProperties = { maxWidth: 'min(360px, max(96px, calc(100vw - 390px)))', fontSize: 12, lineHeight: '18px', overflowWrap: 'anywhere' }
+/* 对比度（浅色底实测）：label-tertiary 3.7:1、state-error-primary 4.498:1，都不到 4.5:1，
+ * 所以「已是最新」用 label-secondary，错误色向正文色掺 20% 压深一点（token 间的 color-mix，随明暗主题走）。
+ * 浏览器不认 color-mix 时退回普通 token 颜色；var() 都带回退值，token 缺失时也有可读的颜色。 */
+const ERROR_TOKEN = 'var(--dsw-alias-state-error-primary, #b3261e)'
+const ERROR_MIXED = `color-mix(in srgb, ${ERROR_TOKEN} 80%, var(--dsw-alias-label-primary, #1c1c1e))`
+const SECONDARY = 'var(--dsw-alias-label-secondary, #5f6368)'
+
+function supportsColorMix(): boolean {
+	try {
+		return typeof CSS !== 'undefined' && CSS.supports('color', 'color-mix(in srgb, red 50%, blue)')
+	} catch {
+		return false
+	}
+}
+
+function statusStyle(tone: Tone): CSSProperties {
+	const color = tone === 'error' ? (supportsColorMix() ? ERROR_MIXED : ERROR_TOKEN) : SECONDARY
+	return { ...STATUS_BASE, color }
+}
+
+function unexpected(e: unknown): Failure {
+	let message = 'unknown error'
+	try {
+		message = clampReason(e instanceof Error ? e.message : String(e))
+	} catch {
+		/* 连描述都取不出来：用上面的缺省 */
+	}
+	return { code: 'unexpected', message }
+}
 
 function reasonText(t: Translate, failure: Failure): string {
 	const { key, params } = reasonMessage(failure)
@@ -50,18 +72,26 @@ export function UpdateAction({ subject, t, checkUpdate, installUpdate, restartPe
 	const enabled = subject.kind === 'bundle' ? subject.pkg.enabled !== false : true
 	const [phase, setPhase] = useState<Phase>({ kind: 'checking' })
 	const live = useRef(true)
+	const running = useRef<AbortController | null>(null)
 	useEffect(() => {
 		live.current = true
 		return () => {
 			live.current = false
+			running.current?.abort()
 		}
 	}, [])
 
 	const check = (): void => {
+		/* 新的一次检查作废上一次（包括它还在等配置）。 */
+		running.current?.abort()
+		const ctl = new AbortController()
+		running.current = ctl
 		setPhase({ kind: 'checking' })
-		void checkUpdate(installed).then((result) => {
-			if (live.current) setPhase({ kind: 'checked', check: result })
-		})
+		void checkUpdate(installed, ctl.signal)
+			.catch((e: unknown): UpdateCheck => ({ kind: 'failed', failure: unexpected(e) }))
+			.then((result) => {
+				if (live.current && running.current === ctl) setPhase({ kind: 'checked', check: result })
+			})
 	}
 	useEffect(() => {
 		/* 换了版本（页面按新的 subject 重画）就再查一次。 */
@@ -74,9 +104,11 @@ export function UpdateAction({ subject, t, checkUpdate, installUpdate, restartPe
 
 	const install = (url: string, version: string): void => {
 		setPhase({ kind: 'installing', version })
-		void installUpdate(url, version, enabled).then((outcome) => {
-			if (live.current) setPhase({ kind: 'installed', version, outcome })
-		})
+		void installUpdate(url, version, enabled)
+			.catch((e: unknown): InstallOutcome => ({ kind: 'failed', failure: unexpected(e) }))
+			.then((outcome) => {
+				if (live.current) setPhase({ kind: 'installed', version, outcome })
+			})
 	}
 
 	let button: { label: string; onClick?: () => void; busy?: boolean; primary?: boolean }
@@ -117,7 +149,7 @@ export function UpdateAction({ subject, t, checkUpdate, installUpdate, restartPe
 	return (
 		<span style={WRAP}>
 			{status !== null ? (
-				<span style={{ ...STATUS_BASE, ...STATUS[status.tone] }} role={status.tone === 'error' ? 'alert' : 'status'}>
+				<span style={statusStyle(status.tone)} role={status.tone === 'error' ? 'alert' : 'status'}>
 					{status.text}
 				</span>
 			) : null}

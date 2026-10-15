@@ -75,7 +75,9 @@ export const en = {
 	updateReasonBadEntry: 'The dsh-tool-gdrive entry is malformed: {detail}',
 	updateReasonBadFile: 'Rejected "{file}": not the versioned package of dsh-tool-gdrive {version}',
 	updateReasonCancelled: 'Installation was cancelled',
-	updateReasonInstall: '{text}'
+	updateReasonInstall: '{text}',
+	updateReasonConfigLoading: 'The settings of this plugin cannot be read yet. Click Retry in a moment.',
+	updateReasonUnexpected: 'Unexpected error: {message}'
 }
 
 export const zh = {
@@ -148,5 +150,7 @@ export const zh = {
 	updateReasonBadEntry: '市场清单里 dsh-tool-gdrive 的条目不完整：{detail}',
 	updateReasonBadFile: '市场给的安装包「{file}」不是 dsh-tool-gdrive {version} 的版本化文件，已拒绝',
 	updateReasonCancelled: '安装被取消',
-	updateReasonInstall: '{text}'
+	updateReasonInstall: '{text}',
+	updateReasonConfigLoading: '还读不到本插件的配置，稍后点重试',
+	updateReasonUnexpected: '出现意外错误：{message}'
 }
