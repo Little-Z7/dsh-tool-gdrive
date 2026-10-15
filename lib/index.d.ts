@@ -19,6 +19,8 @@ export interface PluginConfig {
     maxChars: number;
     pageSize: number;
     timeoutMs: number;
+    /** 只给浏览器半侧「检查更新」读；服务端不用。留空 = 缺省市场地址。 */
+    marketUrl?: string;
 }
 export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     clientId: Schema<string, string, "volatile">;
@@ -30,6 +32,7 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     maxChars: Schema<number, number, "volatile-defined">;
     pageSize: Schema<number, number, "volatile-defined">;
     timeoutMs: Schema<number, number, "volatile-defined">;
+    marketUrl: Schema<string, string, "volatile-defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     clientId: Schema<string, string, "volatile">;
     clientSecret: Schema<string, string, "volatile">;
@@ -40,5 +43,6 @@ export declare const Config: Schema<Schemastery.ObjectS<NoInfer<{
     maxChars: Schema<number, number, "volatile-defined">;
     pageSize: Schema<number, number, "volatile-defined">;
     timeoutMs: Schema<number, number, "volatile-defined">;
+    marketUrl: Schema<string, string, "volatile-defined">;
 }>>, "plain">;
 export declare function apply(ctx: Context, config: PluginConfig): void;

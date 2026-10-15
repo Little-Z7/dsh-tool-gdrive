@@ -48,6 +48,7 @@ DeepSeek Harness（DSH）的 Google 云端硬盘插件：读写闭环 + 工具�
     # bridgePort: 0        # 可选，配置页桥接端口；0 = port+10
     # maxChars: 8000       # 可选，读取截断
     # pageSize: 20         # 可选，分页大小
+    # marketUrl: ''        # 可选，检查更新读取的市场地址；留空 = https://tv.auraaigc.ccwu.cc:56814
 ```
 
 `clientId/clientSecret` 在 0.2.0 起为可选：未配置时插件正常加载、配置页可用，只有 API 调用会给出中文指引报错。
@@ -59,17 +60,29 @@ DeepSeek Harness（DSH）的 Google 云端硬盘插件：读写闭环 + 工具�
 3. 页面状态变为「已授权」（或调 `gdrive_auth_status` 确认）。
 4. 正常使用其余工具。写操作在 `readonly` 模式下会被拒绝并给出切换指引；切换 `mode` 后需删除 token 文件（默认 `~/.config/dsh/gdrive-tokens.json`）重新授权。
 
+## 更新
+
+0.2.6 起，在 DSH 插件页打开本插件（dsh-tool-gdrive）的组合包详情，页头有「检查更新」按钮；有新版时按钮变成「更新到 x.y.z」，点一下由 DSH 安装，**装好后要重启 DSH 才生效**。插件被停用时，它的浏览器半侧也不加载，详情页不会出现这个按钮——先启用插件再更新。
+
+- 0.2.5 及更早的版本没有这个按钮，或是从 `github:` 地址装的：先用灵环 TV 插件市场里的安装命令更新一次，之后就能用按钮。
+- 检查读的市场地址默认是 `https://tv.auraaigc.ccwu.cc:56814`，可以在配置页「插件市场地址」改（只接受 https；本机地址如 `http://127.0.0.1:8765` 可以用 http，仅供测试）。留空恢复缺省。
+- 用按钮装过之后，DSH 里记录的安装来源会变成市场的下载地址（`http(s)://…/dsh-market/…tgz`）；市场的安装、卸载命令对它照常有效。
+- 网页版只刷新页面、不重启 DSH 时，页面会误显示「已是最新」，因为 DSH 不告诉页面宿主半侧跑的是哪一版。
+- 打开详情页会访问一次灵环 TV（读 `/dsh-market/index.json`），请求不带 Referer 和 Cookie，TV 的访问日志里会有你的 IP 和时间。
+
 ## 安全说明
 
 - token 只存本机文件（0600），不随包分发、不进任何远程。
 - 配置页桥接仅绑定 `127.0.0.1`：`/gdrive/status` 不含 token，`/gdrive/start-auth` 仅接受 POST；CORS 放开仅限本机回环场景。
 - OAuth 回调带随机 `state` 校验，防回环授权码注入。
+- 一键更新不核对市场给的摘要，只有 pnpm 自己的完整性记录；信任来源是配置的市场地址（默认 https 的灵环 TV）。要核对摘要，请用市场的安装命令。
 
 ## 开发与打包
 
 ```bash
 pnpm install
 pnpm build                 # tsc → lib/
+pnpm test                  # 类型检查 + node --test（需 Node ≥22.19；client.test 读已构建的 lib/client.js）
 dsh plugin --profile <name> add ./dsh-tool-gdrive
 dsh --profile <name> --dump-config   # 验证挂载
 ```

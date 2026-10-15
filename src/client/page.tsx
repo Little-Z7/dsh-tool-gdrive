@@ -16,6 +16,7 @@ import {
 	type SettingsFormScope,
 	type TagTone
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { DEFAULT_MARKET_URL, marketSite } from './update.js'
 
 type T = (key: string) => string
 
@@ -29,6 +30,19 @@ function settingsModeField(field: string): SettingsFieldSpec {
 			if (v === '') return { kind: 'clear' }
 			if (v === 'readonly' || v === 'readwrite' || v === 'full') return { kind: 'set', value: v }
 			return undefined
+		}
+	}
+}
+
+/** 市场地址：空串表示恢复缺省；合格的存归一化后的 origin；不合格返回 undefined（表单据此阻止保存）。 */
+function settingsMarketUrlField(field: string): SettingsFieldSpec {
+	return {
+		field,
+		format: (v) => String(v ?? ''),
+		parse: (text) => {
+			if (text.trim() === '') return { kind: 'clear' }
+			const site = marketSite(text)
+			return site.ok ? { kind: 'set', value: site.origin } : undefined
 		}
 	}
 }
@@ -47,6 +61,7 @@ interface FormSnapshot {
 	bridgePort: { text: string; overridden: boolean; invalid: boolean }
 	maxChars: { text: string; overridden: boolean; invalid: boolean }
 	pageSize: { text: string; overridden: boolean; invalid: boolean }
+	marketUrl: { text: string; overridden: boolean; invalid: boolean }
 	secretConfigured: boolean
 	clientIdConfigured: boolean
 	effectiveBridgePort: number
@@ -72,7 +87,8 @@ export class GdriveFormController {
 				settingsNumberField('port'),
 				settingsNumberField('bridgePort'),
 				settingsNumberField('maxChars'),
-				settingsNumberField('pageSize')
+				settingsNumberField('pageSize'),
+				settingsMarketUrlField('marketUrl')
 			],
 			secrets
 		)
@@ -94,6 +110,7 @@ export class GdriveFormController {
 			bridgePort: this.form.field('bridgePort'),
 			maxChars: this.form.field('maxChars'),
 			pageSize: this.form.field('pageSize'),
+			marketUrl: this.form.field('marketUrl'),
 			secretConfigured: typeof user.clientSecret === 'string' && user.clientSecret.length > 0,
 			clientIdConfigured: typeof user.clientId === 'string' && user.clientId.length > 0,
 			effectiveBridgePort: bridge
@@ -319,6 +336,19 @@ export function GdrivePage(props: PageProps) {
 					{...state.pageSize}
 					onEdit={(text) => props.edit('pageSize', text)}
 					onReset={() => props.resetField('pageSize')}
+				/>
+				<SettingsValueField
+					id="gdrive-market-url"
+					label={t('marketUrl')}
+					hint={t('marketUrlHint')}
+					overriddenLabel={t('overridden')}
+					resetLabel={t('reset')}
+					invalidLabel={t('invalidUrl')}
+					placeholder={DEFAULT_MARKET_URL}
+					disabled={disabled}
+					{...state.marketUrl}
+					onEdit={(text) => props.edit('marketUrl', text)}
+					onReset={() => props.resetField('marketUrl')}
 				/>
 			</SettingsForm>
 			<GcpGuide t={t} defaultOpen={!(state.clientIdConfigured && state.secretConfigured)} />
