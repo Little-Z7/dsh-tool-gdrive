@@ -1,6 +1,6 @@
 {
   "name": "dsh-tool-gdrive",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "DeepSeek Harness Google Drive 插件：读写闭环（列目录/搜索/下载/上传/改名/移动/软删/Docs/Sheets 读写）+ 工具内 OAuth 授权向导",
   "license": "MIT",
   "type": "module",
@@ -44,19 +44,19 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
-    "@deepseek-ai/schemastery": "~3.18.4",
     "google-auth-library": "^11.2.0",
     "googleapis": "^185.0.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.4"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
     "@deepseek-ai/dsh-client-ui-primitives": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.4",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.1",
     "esbuild": "^0.25.0",

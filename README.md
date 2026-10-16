@@ -60,6 +60,14 @@ DeepSeek Harness（DSH）的 Google 云端硬盘插件：读写闭环 + 工具�
 3. 页面状态变为「已授权」（或调 `gdrive_auth_status` 确认）。
 4. 正常使用其余工具。写操作在 `readonly` 模式下会被拒绝并给出切换指引；切换 `mode` 后需删除 token 文件（默认 `~/.config/dsh/gdrive-tokens.json`）重新授权。
 
+## 0.2.4–0.2.6 的已知问题（0.2.7 已修）
+
+这三个版本装进某个 profile 后，该 profile 里**所有**工具（不只 gdrive）的调用都会失败，报 `Cannot read properties of undefined (reading 'prepare')`，新会话必现，Mac / Windows 都一样。
+
+原因：插件把 DSH 自带的包（`@deepseek-ai/dsh-tools`、`@deepseek-ai/schemastery`）写成了普通依赖，安装时被提升到 profile 的 `node_modules` 里，盖过了 DSH 自己那份。
+
+处理：升到 0.2.7，然后重启 DSH。0.2.6 可以在插件详情页点「更新到 0.2.7」；更早的版本用灵环 TV 插件市场的安装命令。临时绕过：先卸载本插件，再重启 DSH。
+
 ## 更新
 
 0.2.6 起，在 DSH 插件页打开本插件（dsh-tool-gdrive）的组合包详情，页头有「检查更新」按钮；有新版时按钮变成「更新到 x.y.z」，点一下由 DSH 安装，**装好后要重启 DSH 才生效**。插件被停用时，它的浏览器半侧也不加载，详情页不会出现这个按钮——先启用插件再更新。
@@ -87,6 +95,8 @@ pnpm test                  # 类型检查 + node --test（需 Node ≥22.19；cl
 dsh plugin --profile <name> add ./dsh-tool-gdrive
 dsh --profile <name> --dump-config   # 验证挂载
 ```
+
+约定：`@deepseek-ai/*` 只能写进 `peerDependencies`（构建需要的同时写进 `devDependencies`），不能写进 `dependencies`——DSH 的 profile 用 `nodeLinker: hoisted`，写进 `dependencies` 的会被提升到 profile 根 `node_modules`，盖过 DSH 自带那份，导致所有工具调用失败。由 `src/client/manifest.test.ts` 守卫。
 
 ## 已知边界（首版不做）
 
