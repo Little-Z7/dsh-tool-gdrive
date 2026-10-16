@@ -64,9 +64,13 @@ DeepSeek Harness（DSH）的 Google 云端硬盘插件：读写闭环 + 工具�
 
 这三个版本装进某个 profile 后，该 profile 里**所有**工具（不只 gdrive）的调用都会失败，报 `Cannot read properties of undefined (reading 'prepare')`，新会话必现，Mac / Windows 都一样。
 
-原因：插件把 DSH 自带的包（`@deepseek-ai/dsh-tools`、`@deepseek-ai/schemastery`）写成了普通依赖，安装时被提升到 profile 的 `node_modules` 里，盖过了 DSH 自己那份。
+原因：插件把 DSH 自带的包（`@deepseek-ai/dsh-tools`、`@deepseek-ai/schemastery`）写进了 dependencies，安装时被提升到 profile 根的 `node_modules` 里，盖过了 DSH 自己那份。0.2.7 起 DSH 自带的包既不写 dependencies 也不写 peer，只用 `@deepseek-ai/dsh` 这一个 peer 做版本约束。
 
-处理：升到 0.2.7，然后重启 DSH。0.2.6 可以在插件详情页点「更新到 0.2.7」；更早的版本用灵环 TV 插件市场的安装命令。临时绕过：先卸载本插件，再重启 DSH。
+恢复方法：升到 0.2.7，然后重启 DSH。
+
+1. 0.2.6：在插件详情页点「更新到 0.2.7」，装好后重启 DSH。
+2. 更早的版本：用灵环 TV 插件市场的安装命令更新，然后重启 DSH。
+3. 暂时没法更新：先卸载本插件，再重启 DSH。
 
 ## 更新
 
@@ -96,7 +100,7 @@ dsh plugin --profile <name> add ./dsh-tool-gdrive
 dsh --profile <name> --dump-config   # 验证挂载
 ```
 
-约定：`@deepseek-ai/*` 只能写进 `peerDependencies`（构建需要的同时写进 `devDependencies`），不能写进 `dependencies`——DSH 的 profile 用 `nodeLinker: hoisted`，写进 `dependencies` 的会被提升到 profile 根 `node_modules`，盖过 DSH 自带那份，导致所有工具调用失败。由 `src/client/manifest.test.ts` 守卫。
+约定：`@deepseek-ai/*` 不能写进 `dependencies` / `optionalDependencies`，`peerDependencies` 里也只能有 `@deepseek-ai/dsh`（做 DSH 运行时的版本检查）；构建用到的 DSH 包只写 `devDependencies`，运行时由 DSH 宿主提供。原因：profile 用 `nodeLinker: hoisted`，写进 dependencies 的会被提升到 profile 根 `node_modules`、盖过 DSH 自带那份；写成 peer 的 DSH 包会被 pnpm 解析到 profile 里已有的旧副本，覆盖更新时不会清掉，DSH 又会把插件绑到这份副本，同样导致所有工具调用失败。仓库的 `pnpm-workspace.yaml` 设了 `autoInstallPeers: false`，否则 pnpm 会把 `@deepseek-ai/dsh` 整个装成开发依赖。由 `src/client/manifest.test.ts` 守卫。
 
 ## 已知边界（首版不做）
 

@@ -7,12 +7,14 @@ const pkg = JSON.parse(readFileSync(new URL('package.json', root), 'utf8')) as {
 	dependencies?: Record<string, string>
 	optionalDependencies?: Record<string, string>
 	peerDependencies?: Record<string, string>
+	devDependencies?: Record<string, string>
 }
 
 const WHY =
-	'DSH profile 用 nodeLinker: hoisted，写进 dependencies 的 @deepseek-ai/* 会被提升到 profile 根 node_modules、' +
-	"盖过 DSH 自带那份，导致所有工具调用报 `Cannot read properties of undefined (reading 'prepare')`；" +
-	'要写进 peerDependencies（开发构建另写 devDependencies）。'
+	'DSH profile 用 nodeLinker: hoisted：写进 dependencies 的 @deepseek-ai/* 会被提升到 profile 根 node_modules、盖过 DSH 自带那份；' +
+	'写成 peer 的 DSH 包会被 pnpm 解析到 profile 里已有的副本（例如 0.2.4–0.2.6 留下的），覆盖更新时不会清掉，DSH 又会把插件绑到这份副本。' +
+	"两种都会导致所有工具调用报 `Cannot read properties of undefined (reading 'prepare')`。" +
+	'修法：只在 peerDependencies 写 @deepseek-ai/dsh 做版本约束，构建用到的 DSH 包写 devDependencies，仓库 pnpm-workspace.yaml 关 autoInstallPeers。'
 
 test('dependencies / optionalDependencies 里不得有 @deepseek-ai/*', () => {
 	for (const field of ['dependencies', 'optionalDependencies'] as const) {
@@ -21,9 +23,7 @@ test('dependencies / optionalDependencies 里不得有 @deepseek-ai/*', () => {
 	}
 })
 
-/** lib/client.js 是浏览器端产物：其中的 require 由 DSH 前端宿主的模块加载器提供，不经 profile 安装。 */
 const CLIENT_BUNDLE = 'client.js'
-const HOST_PROVIDED_CLIENT_MODULES = ['@deepseek-ai/dsh-client-ui-primitives']
 
 /** 返回 src 里引用到的 `@deepseek-ai/<名字>`（去掉子路径）。 */
 function scanDshRefs(src: string): Set<string> {
@@ -72,7 +72,14 @@ test('scanDshRefs 识别各种引用写法', () => {
 	)
 })
 
-test('lib/*.js 引用的 @deepseek-ai/* 都必须声明在 peerDependencies（client.js 可另用宿主模块白名单）', () => {
+test('peerDependencies 里的 @deepseek-ai/* 只能是 @deepseek-ai/dsh，且必须有它', () => {
+	const peers = Object.keys(pkg.peerDependencies ?? {}).filter((name) => name.startsWith('@deepseek-ai/'))
+	const extra = peers.filter((name) => name !== '@deepseek-ai/dsh')
+	assert.deepEqual(extra, [], `peerDependencies 里不能有 ${extra.join(', ')}。${WHY}`)
+	assert.ok('@deepseek-ai/dsh' in (pkg.peerDependencies ?? {}), `peerDependencies 必须有 @deepseek-ai/dsh（DSH 运行时版本检查靠它）。${WHY}`)
+})
+
+test('lib/*.js 引用的 @deepseek-ai/* 都必须登记在 devDependencies（运行时由 DSH 宿主提供）', () => {
 	const libDir = new URL('lib/', root)
 	const nodeUsed = new Set<string>()
 	let clientUsed = new Set<string>()
@@ -83,21 +90,14 @@ test('lib/*.js 引用的 @deepseek-ai/* 都必须声明在 peerDependencies（cl
 	}
 	assert.ok(nodeUsed.size > 0, 'Node 侧 lib/*.js 没扫到任何 @deepseek-ai/* 引用（需先 pnpm build，或扫描正则已失效）')
 	assert.ok(clientUsed.size > 0, `${CLIENT_BUNDLE} 没扫到任何 @deepseek-ai/* 引用（需先 pnpm build，或扫描正则已失效）`)
-	const peers = pkg.peerDependencies ?? {}
-	const nodeMissing = [...nodeUsed].filter((name) => !(name in peers))
-	assert.deepEqual(nodeMissing, [], `Node 侧 lib 引用了但未写进 peerDependencies：${nodeMissing.join(', ')}。${WHY}`)
-	const clientMissing = [...clientUsed].filter((name) => !(name in peers) && !HOST_PROVIDED_CLIENT_MODULES.includes(name))
-	assert.deepEqual(
-		clientMissing,
-		[],
-		`${CLIENT_BUNDLE} 引用了既未写进 peerDependencies、也不在 HOST_PROVIDED_CLIENT_MODULES 的模块：${clientMissing.join(', ')}。${WHY}`,
+	const dev = pkg.devDependencies ?? {}
+	const runtime = new Set(
+		['dependencies', 'optionalDependencies', 'peerDependencies'].flatMap((f) => Object.keys(pkg[f as 'dependencies'] ?? {})),
 	)
-	const stale = HOST_PROVIDED_CLIENT_MODULES.filter((name) => !clientUsed.has(name))
-	assert.deepEqual(stale, [], `HOST_PROVIDED_CLIENT_MODULES 里的 ${stale.join(', ')} 已不被 ${CLIENT_BUNDLE} 引用，白名单过期，请删除。`)
-	const hostInNode = HOST_PROVIDED_CLIENT_MODULES.filter((name) => nodeUsed.has(name))
-	assert.deepEqual(
-		hostInNode,
-		[],
-		`${hostInNode.join(', ')} 被 Node 侧 lib 引用：白名单只放行浏览器产物 ${CLIENT_BUNDLE}，Node 侧用到就必须写进 peerDependencies。${WHY}`,
-	)
+	for (const [label, used] of [['Node 侧 lib', nodeUsed], [CLIENT_BUNDLE, clientUsed]] as const) {
+		const missing = [...used].filter((name) => !(name in dev))
+		assert.deepEqual(missing, [], `${label} 引用了但未登记在 devDependencies：${missing.join(', ')}。${WHY}`)
+		const bad = [...used].filter((name) => runtime.has(name))
+		assert.deepEqual(bad, [], `${label} 引用的 ${bad.join(', ')} 不得写在 dependencies / optionalDependencies / peerDependencies。${WHY}`)
+	}
 })
