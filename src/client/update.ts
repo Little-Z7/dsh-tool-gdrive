@@ -14,6 +14,11 @@
  * 会把 package.json 里已有的远程依赖重新解析一遍，拿锁文件里的旧摘要去校验旧地址现在的字节，
  * 出 ERR_PNPM_TARBALL_INTEGRITY。带上包名后 pnpm 直接替换这一条依赖，不再碰旧地址。
  * DSH 的 parseInstallSpec 把它当带版本范围的 registry 写法，装完按「package.json 里哪个依赖变了」认包。
+ *
+ * ⚠️ DSH 0.2.1 起 profile 默认开 HMR，带包名的写法会被拒：HMR 下 `installBundle` 见 spec 点名的是已装的包，
+ * 在跑 pnpm 之前就回 `already-installed`（profile 文件没动）。DSH 插件管理 README 写明，pnpm 跑完才知道包名的
+ * tarball 写法仍可装在已装的包上、由 HMR 换掉在跑的插件，所以遇到这条拒绝就用同一个地址、不带包名再装一次。
+ * DSH 0.2.1 自带 pnpm 11.28，光给地址不再拿旧摘要校验旧地址。DSH 0.2.0（pnpm 11.7、没有 HMR）仍走带包名的第一遍。
  */
 import type { InstallResult, PluginManagerRemote, RemoteResult } from './contract.js'
 
@@ -394,9 +399,38 @@ export function newRequestId(now: number = Date.now()): string {
 	return `gdrive-update-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+type Attempt = { ok: true; result: InstallResult } | { ok: false; reason: string }
+
 /**
- * 装新版。`installBundle` 要跑一次 pnpm（十几秒），这期间传输层断了不等于安装失败 ——
- * 按请求编号再问一次结果。`enabled` 传插件当前的启停状态：已停用的插件更新后仍是停用。
+ * 交给 `installBundle` 装一次。它要跑一次 pnpm（十几秒），这期间传输层断了不等于安装失败 ——
+ * 按请求编号再问一次结果。两个远程调用都可能 reject（不只是回 `ok:false`）：在这里归一化。
+ */
+async function installOnce(manager: PluginManagerRemote, spec: string, enabled: boolean, requestId: string): Promise<Attempt> {
+	let answer: RemoteResult<InstallResult>
+	try {
+		answer = await manager.installBundle(spec, { enabled, requestId })
+	} catch (e) {
+		answer = { ok: false, error: { code: 'rejected', message: errorMessage(e) } }
+	}
+	if (answer.ok) return { ok: true, result: answer.value }
+	let recovered: RemoteResult<InstallResult | null> | undefined
+	try {
+		recovered = await manager.waitForInstall(requestId)
+	} catch {
+		recovered = undefined
+	}
+	if (recovered?.ok && recovered.value) return { ok: true, result: recovered.value }
+	return { ok: false, reason: answer.error.message || answer.error.code }
+}
+
+/** HMR 下对「spec 点名已装的包」的拒绝：发生在 pnpm 之前，可以换写法再装（见文件头）。 */
+function refusedAsInstalled(result: InstallResult): boolean {
+	return result.application === 'failed' && result.error?.code === 'already-installed'
+}
+
+/**
+ * 装新版：先带包名，被 HMR 以 already-installed 拒绝时改用不带包名的同一地址（原因见文件头）。
+ * `enabled` 传插件当前的启停状态：已停用的插件更新后仍是停用。调用方永远拿到一个结果。
  */
 export async function installUpdate(
 	manager: PluginManagerRemote,
@@ -404,24 +438,10 @@ export async function installUpdate(
 	enabled: boolean,
 	requestId: string = newRequestId()
 ): Promise<InstallOutcome> {
-	/* 两个远程调用都可能 reject（不只是回 `ok:false`）：在这里归一化，调用方永远拿到一个结果。 */
-	let answer: RemoteResult<InstallResult>
-	try {
-		answer = await manager.installBundle(updateSpec(url), { enabled, requestId })
-	} catch (e) {
-		answer = { ok: false, error: { code: 'rejected', message: errorMessage(e) } }
-	}
-	if (!answer.ok) {
-		let recovered: RemoteResult<InstallResult | null> | undefined
-		try {
-			recovered = await manager.waitForInstall(requestId)
-		} catch {
-			recovered = undefined
-		}
-		if (recovered?.ok && recovered.value) answer = { ok: true, value: recovered.value }
-		else return { kind: 'failed', failure: { code: 'install', text: clampReason(answer.error.message || answer.error.code) } }
-	}
-	const result = answer.value
+	let attempt = await installOnce(manager, updateSpec(url), enabled, requestId)
+	if (attempt.ok && refusedAsInstalled(attempt.result)) attempt = await installOnce(manager, url, enabled, requestId)
+	if (!attempt.ok) return { kind: 'failed', failure: { code: 'install', text: clampReason(attempt.reason) } }
+	const result = attempt.result
 	if (result.application === 'restart-required') return { kind: 'restart' }
 	if (result.application === 'applied') return { kind: 'applied' }
 	if (result.application === 'cancelled') return { kind: 'failed', failure: { code: 'cancelled' } }

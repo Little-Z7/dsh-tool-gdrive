@@ -60,6 +60,12 @@ DeepSeek Harness（DSH）的 Google 云端硬盘插件：读写闭环 + 工具�
 3. 页面状态变为「已授权」（或调 `gdrive_auth_status` 确认）。
 4. 正常使用其余工具。写操作在 `readonly` 模式下会被拒绝并给出切换指引；切换 `mode` 后需删除 token 文件（默认 `~/.config/dsh/gdrive-tokens.json`）重新授权。
 
+## 0.2.7 在 DSH 0.2.1 上被判「不兼容」（0.2.8 已修）
+
+0.2.7 的 `peerDependencies` 把 `@deepseek-ai/dsh` 钉死在 `0.2.0-rc.2`。DSH 升到 0.2.1-rc.2 后，插件页把它标成「异常」：「dsh-tool-gdrive@0.2.7 与 DSH 0.2.1-rc.2 不兼容（要求 @deepseek-ai/dsh 0.2.0-rc.2）」，插件不加载，所以详情页也没有「检查更新」按钮。0.2.8 改成 `>=0.2.0-rc.2 <0.3.0-0`，同一条 0.2 线上的 DSH 都能装。
+
+恢复方法：用灵环 TV 插件市场的安装命令装 0.2.8（脚本会先移除 0.2.7 再装），然后重启 DSH。
+
 ## 0.2.4–0.2.6 的已知问题（0.2.7 已修）
 
 这三个版本装进某个 profile 后，该 profile 里**所有**工具（不只 gdrive）的调用都会失败，报 `Cannot read properties of undefined (reading 'prepare')`，新会话必现，Mac / Windows 都一样。
@@ -100,7 +106,7 @@ dsh plugin --profile <name> add ./dsh-tool-gdrive
 dsh --profile <name> --dump-config   # 验证挂载
 ```
 
-约定：`@deepseek-ai/*` 不能写进 `dependencies` / `optionalDependencies`，`peerDependencies` 里也只能有 `@deepseek-ai/dsh`（做 DSH 运行时的版本检查）；构建用到的 DSH 包只写 `devDependencies`，运行时由 DSH 宿主提供。原因：profile 用 `nodeLinker: hoisted`，写进 dependencies 的会被提升到 profile 根 `node_modules`、盖过 DSH 自带那份；写成 peer 的 DSH 包会被 pnpm 解析到 profile 里已有的旧副本，覆盖更新时不会清掉，DSH 又会把插件绑到这份副本，同样导致所有工具调用失败。仓库的 `pnpm-workspace.yaml` 设了 `autoInstallPeers: false`，否则 pnpm 会把 `@deepseek-ai/dsh` 整个装成开发依赖。由 `src/client/manifest.test.ts` 守卫。
+约定：`@deepseek-ai/*` 不能写进 `dependencies` / `optionalDependencies`，`peerDependencies` 里也只能有 `@deepseek-ai/dsh`（做 DSH 运行时的版本检查），而且要写成范围（现为 `>=0.2.0-rc.2 <0.3.0-0`）——钉死一个版本时 DSH 一升级插件就被判不兼容、整个停掉；构建用到的 DSH 包只写 `devDependencies`，运行时由 DSH 宿主提供。原因：profile 用 `nodeLinker: hoisted`，写进 dependencies 的会被提升到 profile 根 `node_modules`、盖过 DSH 自带那份；写成 peer 的 DSH 包会被 pnpm 解析到 profile 里已有的旧副本，覆盖更新时不会清掉，DSH 又会把插件绑到这份副本，同样导致所有工具调用失败。仓库的 `pnpm-workspace.yaml` 设了 `autoInstallPeers: false`，否则 pnpm 会把 `@deepseek-ai/dsh` 整个装成开发依赖。由 `src/client/manifest.test.ts` 守卫。
 
 ## 已知边界（首版不做）
 

@@ -79,6 +79,14 @@ test('peerDependencies 里的 @deepseek-ai/* 只能是 @deepseek-ai/dsh，且必
 	assert.ok('@deepseek-ai/dsh' in (pkg.peerDependencies ?? {}), `peerDependencies 必须有 @deepseek-ai/dsh（DSH 运行时版本检查靠它）。${WHY}`)
 })
 
+test('peerDependencies 的 @deepseek-ai/dsh 是一段版本范围，不钉死某一个版本', () => {
+	/* 0.2.7 写的是 `0.2.0-rc.2`：DSH 一升到 0.2.1-rc.2，插件就被判「不兼容」、整个停掉（DSH 用 semver.satisfies
+	   比 peer，includePrerelease）。范围的上界写到下一个次版本之前，同一条 0.2 线上的 DSH 都能装。 */
+	const range = pkg.peerDependencies?.['@deepseek-ai/dsh'] ?? ''
+	assert.doesNotMatch(range.trim(), /^=?v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, `@deepseek-ai/dsh 的 peer 不能钉死一个版本：${range}`)
+	assert.equal(range, '>=0.2.0-rc.2 <0.3.0-0')
+})
+
 test('lib/*.js 引用的 @deepseek-ai/* 都必须登记在 devDependencies（运行时由 DSH 宿主提供）', () => {
 	const libDir = new URL('lib/', root)
 	const nodeUsed = new Set<string>()

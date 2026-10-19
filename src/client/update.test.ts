@@ -182,17 +182,55 @@ test('checkUpdate：地址不合格时 fetch 被调用 0 次', async () => {
 	}
 })
 
-function manager(install: RemoteResult<InstallResult>, recovered: RemoteResult<InstallResult | null> = { ok: true, value: null }) {
+/** `install` 给数组时按调用顺序逐个回（第二遍装的回执），用完停在最后一个。 */
+function manager(
+	install: RemoteResult<InstallResult> | RemoteResult<InstallResult>[],
+	recovered: RemoteResult<InstallResult | null> = { ok: true, value: null }
+) {
+	const answers = Array.isArray(install) ? install : [install]
 	const calls: { spec: string; options: object }[] = []
 	const remote: PluginManagerRemote = {
 		installBundle: (spec, options) => {
 			calls.push({ spec, options })
-			return Promise.resolve(install)
+			return Promise.resolve(answers[Math.min(calls.length, answers.length) - 1]!)
 		},
 		waitForInstall: () => Promise.resolve(recovered)
 	}
 	return { remote, calls }
 }
+
+const ALREADY: RemoteResult<InstallResult> = { ok: true, value: { application: 'failed', error: { code: 'already-installed' } } }
+
+test('installUpdate：DSH 开着 HMR 以 already-installed 拒绝带包名的写法 → 同一地址不带包名再装一次，启停状态不变', async () => {
+	const url = `https://tv.example/dsh-market/${FILE}`
+	for (const enabled of [true, false]) {
+		const { remote, calls } = manager([ALREADY, { ok: true, value: { application: 'applied' } }])
+		assert.deepEqual(await installUpdate(remote, url, enabled, 'r1'), { kind: 'applied' })
+		assert.deepEqual(calls, [
+			{ spec: `dsh-tool-gdrive@${url}`, options: { enabled, requestId: 'r1' } },
+			{ spec: url, options: { enabled, requestId: 'r1' } }
+		])
+	}
+	const restart = manager([ALREADY, { ok: true, value: { application: 'restart-required' } }])
+	assert.deepEqual(await installUpdate(restart.remote, url, true, 'r'), { kind: 'restart' })
+})
+
+test('installUpdate：第二遍仍失败照常报原因、只重装一次；其他失败不换写法；找回的结果是这条拒绝也换写法', async () => {
+	const twice = manager([ALREADY, ALREADY])
+	assert.deepEqual(await installUpdate(twice.remote, 'u', true, 'r'), { kind: 'failed', failure: { code: 'install', text: 'already-installed' } })
+	assert.equal(twice.calls.length, 2)
+
+	const other = manager({ ok: true, value: { application: 'failed', error: { code: 'incompatible-version' } } })
+	assert.deepEqual(await installUpdate(other.remote, 'u', true, 'r'), { kind: 'failed', failure: { code: 'install', text: 'incompatible-version' } })
+	assert.equal(other.calls.length, 1)
+
+	const lost = manager([{ ok: false, error: { code: 'disconnected', message: 'socket closed' } }, { ok: true, value: { application: 'applied' } }], ALREADY)
+	assert.deepEqual(await installUpdate(lost.remote, 'u', true, 'r'), { kind: 'applied' })
+	assert.deepEqual(
+		lost.calls.map((c) => c.spec),
+		['dsh-tool-gdrive@u', 'u']
+	)
+})
 
 test('updateSpec：必须带包名前缀', () => {
 	assert.equal(updateSpec('https://x/a.tgz'), 'dsh-tool-gdrive@https://x/a.tgz')
